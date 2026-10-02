@@ -37,3 +37,9 @@ OUTDOOR_STADIUMS = {
 
 # Injury designations that mean a player will not play.
 OUT_STATUSES = {"Out", "IR", "PUP", "Sus", "NFI", "Doubtful", "COV", "DNR"}
+
+# Scheduled runs (must match .github/workflows/weekly.yml). Tue/Thu are fixed in
+# UTC; Sunday is pinned to 11:45 ET (just after inactives) via two UTC crons
+# and a time gate in the workflow, so it holds across daylight saving changes.
+SCHEDULE_UTC = [(1, 14, 0), (3, 21, 0)]  # (weekday Mon=0, hour, minute)
+SUNDAY_ET = (6, 11, 45)

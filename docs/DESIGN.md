@@ -220,13 +220,20 @@ dark themes come from CSS tokens.
 - **Schedule** (`.github/workflows/weekly.yml`):
   - Tue 14:00 UTC: stats final, next week's projections
   - Thu 21:00 UTC: practice reports
-  - Sun 15:15 UTC: inactives, final weather, **Vegas props**
+  - Sun **11:45 ET**: just after inactives (posted ~90 min before 1pm kickoffs),
+    final weather, **Vegas props**. Cron is UTC-only, so two crons (15:45 and
+    16:45 UTC) plus a time gate in the workflow keep it at 11:45 ET across
+    daylight-saving changes. `SCHEDULE_UTC`/`SUNDAY_ET` in `config.py` must match
+    the workflow; they drive the page's "next update" time.
 - Each run commits `site/data/` (including `history/{season}_wNN.json`, every
   week's published projections, for future accuracy tracking) and
   `data/props/`.
 - **Odds API budget:** 500 credits/month free. One full-slate pull is ~4
   credits per game (~60 per week). Only the Sunday run fetches. Raw props are
-  committed in `data/props/`, so reruns in the same week never re-spend.
+  committed in `data/props/` with a `fetched_at` time; any run within 3 hours of
+  a pull reuses it instead of re-spending. One free key is enough (~260 of 500
+  credits/month). Don't rotate extra free keys to exceed the limit (likely
+  against The Odds API's terms); use their paid tier if more pulls are needed.
   Never add more prop markets or runs without redoing this math.
 - **Secrets:** `ODDS_API_KEY` is a repo secret; locally it lives in `.env`
   (gitignored). Never commit the key.
@@ -310,4 +317,5 @@ backtest. Compare against the table above; don't ship regressions.
 | 2026-10-02 | Distribution from out-of-sample ratio quantiles | In-sample raw quantiles collapsed (see §3.4) |
 | 2026-10-02 | Yards prop CV 0.62/0.58 | Measured, replacing a guessed 0.85 |
 | 2026-10-02 | QB factor baseline = team's recent QB play; added `qb_upgrade` | Owner feedback on Drake London / Penix (see §3.5). Backtest was neutral (61.7% vs 61.8%, within noise); kept because it gives the model the right signal for QB returns |
+| 2026-10-02 | Sunday run moved 11:15 → 11:45 ET; page shows "updated" (red) and "next update" | Earlier run fired before inactives were posted (owner noticed via Jadarian Price going Out between runs) |
 | 2026-10-02 | Factor key + per-factor "input this week" text on the page | Owner asked what e.g. "+1.4 Game environment" means; definitions live in `publish.FACTOR_KEY` |

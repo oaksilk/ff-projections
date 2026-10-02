@@ -39,6 +39,7 @@ body { margin: 0; background: var(--bg); color: var(--text);
 .wrap { max-width: 1080px; margin: 0 auto; padding: 28px 16px 64px; }
 header h1 { font-size: 24px; margin: 0 0 4px; letter-spacing: -0.01em; }
 header p { margin: 0; color: var(--muted); }
+header .updated { color: var(--neg); font-weight: 600; }
 .num { font-family: "JetBrains Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
 
 .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 20px 0 14px; }
@@ -304,9 +305,11 @@ document.getElementById("q").oninput = e => { state.q = e.target.value; render()
 
 fetch("data/rankings.json", { cache: "no-cache" }).then(r => r.json()).then(d => {
   data = d;
-  const when = new Date(d.generated).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-  document.getElementById("meta").textContent =
-    `${d.season} Week ${d.week} · RB, WR, TE · updated ${when}` + (d.props_games ? ` · blended with Vegas props for ${d.props_games} games` : "");
+  const fmtTime = iso => new Date(iso).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" });
+  document.getElementById("meta").innerHTML =
+    `${d.season} Week ${d.week} · RB, WR, TE · <span class="updated">updated ${esc(fmtTime(d.generated))}</span>` +
+    (d.next_update ? ` · next update ${esc(fmtTime(d.next_update))}` : "") +
+    (d.props_games ? ` · blended with Vegas props for ${d.props_games} games` : "");
   document.getElementById("keylist").innerHTML = (d.factor_key || []).map(f =>
     `<dt>${esc(f.label)}</dt><dd>${esc(f.text)}<br><span class="typ">This week: typically ±${f.typical.toFixed(1)} pts, up to ±${f.max.toFixed(1)}.</span></dd>`).join("");
   seg(document.getElementById("pos"), POS, "pos");

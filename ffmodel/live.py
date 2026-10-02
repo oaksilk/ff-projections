@@ -153,15 +153,31 @@ def _implied(price):
     return 100 / (price + 100) if price > 0 else -price / (-price + 100)
 
 
+def _read_props(path):
+    """(fetched_at, events) from a saved props file; old files are a bare list."""
+    if not path.exists():
+        return None, []
+    data = json.loads(path.read_text())
+    if isinstance(data, list):
+        return None, data
+    return pd.Timestamp(data["fetched_at"]), data["events"]
+
+
 def fetch_props(season, week, games, allow_fetch):
-    """Raw props for the week. Cached per week so reruns don't spend credits."""
+    """Raw props for the week, saved per week in data/props/.
+
+    A pull from the last 3 hours is reused even when fetching is allowed, so a
+    retried or duplicate Sunday run never spends Odds API credits twice.
+    """
     path = PROPS_DIR / f"{season}_w{week:02d}.json"
     PROPS_DIR.mkdir(parents=True, exist_ok=True)
-    if path.exists() and not allow_fetch:
-        return json.loads(path.read_text())
+    fetched_at, saved = _read_props(path)
     key = os.environ.get("ODDS_API_KEY")
-    if not key or not allow_fetch:
-        return json.loads(path.read_text()) if path.exists() else []
+    recent = fetched_at is not None and pd.Timestamp.now(tz="UTC") - fetched_at < pd.Timedelta(hours=3)
+    if not allow_fetch or not key or recent:
+        if allow_fetch and recent:
+            log.info("reusing props fetched at %s", fetched_at)
+        return saved
     events = requests.get(f"{ODDS_BASE}/events", params={"apiKey": key}, timeout=30).json()
     start = pd.to_datetime(games.gameday).min() - pd.Timedelta(days=1)
     end = pd.to_datetime(games.gameday).max() + pd.Timedelta(days=2)
@@ -176,7 +192,9 @@ def fetch_props(season, week, games, allow_fetch):
             out.append(r.json())
         log.info("props %s @ %s: remaining credits %s", e["away_team"], e["home_team"],
                  r.headers.get("x-requests-remaining"))
-    path.write_text(json.dumps(out))
+    if not out and saved:  # nothing upcoming (e.g. all games started); keep what we had
+        return saved
+    path.write_text(json.dumps({"fetched_at": pd.Timestamp.now(tz="UTC").isoformat(), "events": out}))
     return out
 
 

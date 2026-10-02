@@ -4,11 +4,16 @@ on:
   schedule:
     - cron: "0 14 * * 2"    # Tue: last week's stats are final
     - cron: "0 21 * * 4"    # Thu: practice reports, before TNF
-    - cron: "15 15 * * 0"   # Sun ~11am ET: inactives, final weather, Vegas props
+    # Sun 11:45 ET, just after inactives (~90 min before 1pm kickoffs): final
+    # weather and Vegas props. Cron is UTC-only, so one entry lands at 11:45 ET
+    # in daylight time and the other in standard time; the gate skips the other.
+    # Keep in sync with SCHEDULE_UTC / SUNDAY_ET in ffmodel/config.py.
+    - cron: "45 15 * * 0"
+    - cron: "45 16 * * 0"
   workflow_dispatch:
     inputs:
       props:
-        description: "Fetch Vegas props (spends Odds API credits)"
+        description: "Fetch Vegas props (spends Odds API credits unless pulled in the last 3 hours)"
         type: boolean
         default: false
 
@@ -25,24 +30,45 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
     steps:
+      - id: gate
+        name: Sunday time gate
+        run: |
+          # Scheduled Sunday runs proceed only between 11:40 and 12:40 ET
+          # (tolerates GitHub's cron delays); everything else always runs.
+          run=true
+          props=false
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$(TZ=America/New_York date +%u)" = "7" ]; then
+            m=$((10#$(TZ=America/New_York date +%H) * 60 + 10#$(TZ=America/New_York date +%M)))
+            if [ $m -ge 700 ] && [ $m -lt 760 ]; then props=true; else run=false; fi
+          fi
+          if [ "${{ inputs.props }}" = "true" ]; then props=true; fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "props=$props" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'true'
       - uses: actions/setup-python@v5
+        if: steps.gate.outputs.run == 'true'
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install -r requirements.txt
+      - if: steps.gate.outputs.run == 'true'
+        run: pip install -r requirements.txt
       - name: Build rankings
+        if: steps.gate.outputs.run == 'true'
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           CACHE_HOURS: "0"
         run: |
-          if [ "${{ github.event.schedule }}" = "15 15 * * 0" ] || [ "${{ inputs.props }}" = "true" ]; then
+          if [ "${{ steps.gate.outputs.props }}" = "true" ]; then
             python scripts/run_weekly.py --props
           else
             python scripts/run_weekly.py
           fi
       - name: Save history
+        if: steps.gate.outputs.run == 'true'
         run: |
           git config user.name "rankings-bot"
           git config user.email "rankings-bot@users.noreply.github.com"
@@ -50,11 +76,13 @@ jobs:
           git diff --cached --quiet || git commit -m "Rankings update $(date -u +%F)"
           git push
       - uses: actions/upload-pages-artifact@v3
+        if: steps.gate.outputs.run == 'true'
         with:
           path: site
 
   deploy:
     needs: build
+    if: needs.build.outputs.run == 'true'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

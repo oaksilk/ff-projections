@@ -4,20 +4,38 @@ Usage: python scripts/run_weekly.py [--props]
   --props   fetch Vegas player props (spends ~4 Odds API credits per game)
 """
 import argparse
+import datetime as dt
 import logging
 import os
 import sys
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ffmodel import live as lv, publish
-from ffmodel.config import ROOT
+from ffmodel.config import ROOT, SCHEDULE_UTC, SUNDAY_ET
 from ffmodel.data import load_all
 from ffmodel.features import build_features
 from ffmodel.model import Distribution, Projector, add_distribution
+
+
+def next_update(now=None):
+    """Next scheduled run, as an ISO timestamp in UTC."""
+    utc, et = ZoneInfo("UTC"), ZoneInfo("America/New_York")
+    now = now or dt.datetime.now(utc)
+    times = []
+    for days in range(8):
+        day = (now + dt.timedelta(days=days)).date()
+        for wd, h, m in SCHEDULE_UTC:
+            if day.weekday() == wd:
+                times.append(dt.datetime(day.year, day.month, day.day, h, m, tzinfo=utc))
+        day_et = (now.astimezone(et) + dt.timedelta(days=days)).date()
+        if day_et.weekday() == SUNDAY_ET[0]:
+            times.append(dt.datetime(day_et.year, day_et.month, day_et.day, *SUNDAY_ET[1:], tzinfo=et))
+    return min(t for t in times if t > now).astimezone(utc).isoformat(timespec="minutes")
 
 
 def load_env():
@@ -72,7 +90,7 @@ def main():
                for r in wx.itertuples()}
     ctx = publish.context(live, hist, d["players"].set_index("gsis_id").display_name)
     payload = publish.to_json(pred, reasons, players, games, season, week,
-                              {"weather": weather, "props_games": len(raw)}, ctx)
+                              {"weather": weather, "props_games": len(raw), "next_update": next_update()}, ctx)
     publish.write(payload, season, week)
     log.info("wrote %d players", len(payload["players"]))
 
