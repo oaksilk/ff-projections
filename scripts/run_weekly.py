@@ -70,8 +70,9 @@ def main():
     reasons = publish.explain(model, live, hist)
     weather = {r.game_id: {"temp": round(r.temp), "wind": round(r.wind), "precip": round(r.precip, 2)}
                for r in wx.itertuples()}
+    ctx = publish.context(live, hist, d["players"].set_index("gsis_id").display_name)
     payload = publish.to_json(pred, reasons, players, games, season, week,
-                              {"weather": weather, "props_games": len(raw)})
+                              {"weather": weather, "props_games": len(raw)}, ctx)
     publish.write(payload, season, week)
     log.info("wrote %d players", len(payload["players"]))
 

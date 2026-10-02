@@ -343,12 +343,14 @@ def build_features(d, live_players=None, live_def_out=None, weather_override=Non
     dba = dba.rename(columns={"team": "opp"})[["season", "week", "opp", "db_out_share", "db_out_n"]]
 
     # ---- assemble
-    tkeep = ["season", "week", "team", "qb_change", "qb_epa", "qb_games", "vac_tgt", "vac_car"] + \
+    tkeep = ["season", "week", "team", "qb_id", "qb_change", "qb_epa", "qb_games", "vac_tgt", "vac_car"] + \
             [f"tm_{c}" for c in tcols]
     pg = pg.merge(tg[tkeep], on=["season", "week", "team"], how="left")
     pg = pg.merge(dg, on=["season", "week", "opp"], how="left")
     pg = pg.merge(dba, on=["season", "week", "opp"], how="left")
     pg[["db_out_share", "db_out_n"]] = pg[["db_out_share", "db_out_n"]].fillna(0)
+    # How this week's QB compares with the QB play behind the player's recent stats.
+    pg["qb_upgrade"] = pg.qb_epa - pg.tm_epa_per_db
     pg["pos_code"] = pg.position.map({"RB": 0, "WR": 1, "TE": 2})
     # Matchup: what this opponent allows to this player's position.
     for p in POSITIONS:
@@ -363,7 +365,7 @@ def feature_columns(df):
             "dome", "temp", "wind", "n_games", "n_games_season", "last_snap_pct",
             "last_target_share", "last_carry_share", "new_team", "fp_vol", "fp_p90",
             "draft_pick", "years_exp", "inj_report", "inj_practice", "qb_change", "qb_epa",
-            "qb_games", "vac_tgt", "vac_car", "db_out_share", "db_out_n",
+            "qb_games", "qb_upgrade", "vac_tgt", "vac_car", "db_out_share", "db_out_n",
             "def_alw_fp_pos", "def_alw_tg_pos"]
     hist = [c for c in df.columns if c.startswith(("r_", "l_", "tm_"))
             or (c.startswith("def_") and not c.startswith("def_alw_"))]

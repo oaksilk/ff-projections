@@ -89,11 +89,26 @@ tr.row.sel td { background: var(--accent-soft); }
 .chip { font-size: 11.5px; padding: 2px 7px; border-radius: 999px; white-space: nowrap; }
 .chip.up { background: var(--pos-soft); color: var(--pos); }
 .chip.dn { background: var(--neg-soft); color: var(--neg); }
-tr.detail td { background: var(--surface-2); padding: 12px 16px 14px 54px; }
+tr.detail > td { background: var(--surface-2); padding: 12px 16px 14px 54px; }
 .dgrid { display: flex; flex-wrap: wrap; gap: 22px; font-size: 13px; }
 .dgrid div b { display: block; font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
 .cmpbtn { margin-top: 10px; font: inherit; font-size: 13px; border: 1px solid var(--border); background: var(--surface);
   color: var(--text); padding: 5px 10px; border-radius: 8px; cursor: pointer; }
+.ftab { margin-top: 12px; width: auto; max-width: 100%; font-size: 12.5px; }
+.ftab th { padding: 4px 10px 4px 0; border: 0; }
+.ftab td { padding: 3px 12px 3px 0; border: 0; background: transparent !important; vertical-align: top; }
+.ftab .fl { color: var(--muted); white-space: nowrap; }
+.ftab .fv { text-align: right; font-weight: 600; }
+.ftab .fv.up { color: var(--pos); } .ftab .fv.dn { color: var(--neg); }
+.ftab .fc { color: var(--text); }
+details.key { margin-top: 18px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 16px; }
+details.key summary { cursor: pointer; font-weight: 600; }
+details.key dl { margin: 10px 0 0; display: grid; grid-template-columns: minmax(130px, 200px) 1fr; gap: 10px 16px; font-size: 13px; }
+details.key dt { font-weight: 600; }
+details.key dd { margin: 0; color: var(--muted); }
+details.key dd .typ { color: var(--text); font-size: 12px; }
+details.key p { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
+@media (max-width: 760px) { details.key dl { grid-template-columns: 1fr; gap: 2px; } details.key dd { margin-bottom: 8px; } }
 .legend { color: var(--muted); font-size: 12.5px; margin: 14px 2px 0; }
 .legend p { margin: 4px 0; }
 .empty { padding: 40px; text-align: center; color: var(--muted); }
@@ -102,7 +117,7 @@ tr.detail td { background: var(--surface-2); padding: 12px 16px 14px 54px; }
   .range, .why { display: none; }
   td, th { padding: 8px 6px; }
   .pl img { width: 28px; height: 28px; }
-  tr.detail td { padding-left: 16px; }
+  tr.detail > td { padding-left: 16px; }
 }
 </style>
 </head>
@@ -136,6 +151,14 @@ tr.detail td { background: var(--surface-2); padding: 12px 16px 14px 54px; }
       <b>Boom</b> is the chance of 20+ points.</p>
     <p><b>Why</b> shows how many points each factor adds or subtracts compared with a neutral baseline. Click a player for details, then pick a second player to see who is more likely to score more.</p>
   </div>
+
+  <details class="key" id="key">
+    <summary>What the factors mean</summary>
+    <p>Each factor is measured the same way: the model re-runs the player's projection with that factor reset to a neutral baseline, and the difference (in half-PPR points) is the factor's effect.
+      There are no fixed weights; the model learned from ten seasons of games how much each input matters, and the effect depends on the player (a factor can matter more for a pass-catcher than for a running back).
+      Everything not listed here, mainly the player's own role and production, is the baseline projection itself.</p>
+    <dl id="keylist"></dl>
+  </details>
 </div>
 
 <script>
@@ -231,15 +254,16 @@ function detailRow(p) {
     ? `<div><b>Vegas props</b>${v.receptions != null ? v.receptions.toFixed(1) + " rec · " : ""}${v.rec_yards != null ? Math.round(v.rec_yards) + " rec yds · " : ""}${v.rush_yards != null ? Math.round(v.rush_yards) + " rush yds · " : ""}${v.tds != null ? Math.round((1 - Math.exp(-v.tds)) * 100) + "% TD" : ""}</div>
        <div><b>Model alone (half)</b>${p.model_half.toFixed(1)} pts</div>` : `<div><b>Vegas props</b>Not available</div>`;
   const tdp = Math.round((1 - Math.exp(-(s.rec_tds + s.rush_tds))) * 100);
-  const reasons = "Factor adjustments (half-PPR pts): " + Object.entries(p.factors || {})
+  const ctx = p.context || {};
+  const factors = Object.entries(p.factors || {})
     .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
-    .map(([k, v]) => `${k} ${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(1)}`).join(" · ");
+    .map(([k, v]) => `<tr><td class="fl">${esc(k)}</td><td class="fv num ${v >= 0.05 ? "up" : v <= -0.05 ? "dn" : ""}">${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(1)}</td><td class="fc">${esc(ctx[k] || "")}</td></tr>`).join("");
   return `<tr class="detail"><td colspan="6"><div class="dgrid num">
     <div><b>Projected line</b>${s.receptions.toFixed(1)} rec · ${Math.round(s.rec_yards)} rec yds${s.carries >= 1 ? ` · ${s.carries.toFixed(1)} car · ${Math.round(s.rush_yards)} rush yds` : ""} · ${tdp}% TD</div>
     <div><b>Floor / Median / Ceiling</b>${f.q[0].toFixed(1)} / ${f.q[2].toFixed(1)} / ${f.q[4].toFixed(1)}</div>
     ${vline}
   </div>
-  <div class="legend" style="margin-top:8px">${esc(reasons)}</div>
+  <table class="ftab"><thead><tr><th>Factor</th><th class="r">Pts</th><th>Input this week</th></tr></thead><tbody>${factors}</tbody></table>
   <button class="cmpbtn" data-cmp="${p.id}">${state.pick.includes(p.id) ? "Remove from comparison" : "Compare with another player"}</button></td></tr>`;
 }
 
@@ -283,6 +307,8 @@ fetch("data/rankings.json", { cache: "no-cache" }).then(r => r.json()).then(d =>
   const when = new Date(d.generated).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
   document.getElementById("meta").textContent =
     `${d.season} Week ${d.week} · RB, WR, TE · updated ${when}` + (d.props_games ? ` · blended with Vegas props for ${d.props_games} games` : "");
+  document.getElementById("keylist").innerHTML = (d.factor_key || []).map(f =>
+    `<dt>${esc(f.label)}</dt><dd>${esc(f.text)}<br><span class="typ">This week: typically ±${f.typical.toFixed(1)} pts, up to ±${f.max.toFixed(1)}.</span></dd>`).join("");
   seg(document.getElementById("pos"), POS, "pos");
   seg(document.getElementById("fmt"), FMT, "fmt");
   render();
