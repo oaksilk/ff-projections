@@ -1,0 +1,64 @@
+name: Weekly rankings
+
+on:
+  schedule:
+    - cron: "0 14 * * 2"    # Tue: last week's stats are final
+    - cron: "0 21 * * 4"    # Thu: practice reports, before TNF
+    - cron: "15 15 * * 0"   # Sun ~11am ET: inactives, final weather, Vegas props
+  workflow_dispatch:
+    inputs:
+      props:
+        description: "Fetch Vegas props (spends Odds API credits)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: rankings
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Build rankings
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          CACHE_HOURS: "0"
+        run: |
+          if [ "${{ github.event.schedule }}" = "15 15 * * 0" ] || [ "${{ inputs.props }}" = "true" ]; then
+            python scripts/run_weekly.py --props
+          else
+            python scripts/run_weekly.py
+          fi
+      - name: Save history
+        run: |
+          git config user.name "rankings-bot"
+          git config user.email "rankings-bot@users.noreply.github.com"
+          git add site/data data/props
+          git diff --cached --quiet || git commit -m "Rankings update $(date -u +%F)"
+          git push
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
