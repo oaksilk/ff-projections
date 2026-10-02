@@ -24,6 +24,11 @@ philosophy, architecture, validation results and decision log. Update it
   what this player has been dealing with" (see DESIGN.md §3.5). The owner is
   non-technical; page copy should be plain English.
 - **Keep it free and hands-off.** No paid services or manual weekly steps.
+- **Read `docs/OPERATIONS.md` before touching the schedule, snapshots,
+  evaluation or off-season logic**, and update it in the same change.
+- **Snapshots are immutable.** Never overwrite, edit or regenerate files in
+  `snapshots/`; they are the pre-kickoff record. Expert comparisons use the ECR
+  saved *inside* each snapshot, never a fresh download.
 
 ## Commands
 
@@ -31,6 +36,7 @@ philosophy, architecture, validation results and decision log. Update it
 .venv/bin/python scripts/run_weekly.py           # build this week's rankings (no new props)
 .venv/bin/python scripts/run_weekly.py --props   # also fetch Vegas props (spends credits)
 .venv/bin/python scripts/backtest.py             # walk-forward validation vs FantasyPros ECR
+.venv/bin/python scripts/evaluate.py             # score finished weeks' snapshots (reports/live/)
 ```
 
 Preview locally: `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`,

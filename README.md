@@ -62,13 +62,24 @@ All times are Eastern; the source of truth is `SCHEDULE_ET` in `ffmodel/config.p
 
 | When | What updates |
 |---|---|
-| Nightly 7:05 PM | Injury news; Thu/Sun/Mon-night inactives |
-| Tue 10:00 AM | Last week's stats are final |
+| Nightly 7:05 PM | Injury news; Thu/Sun/Mon-night inactives (Friday's run also saves a snapshot) |
+| Tue 10:00 AM | Last week's stats are final; last week's report card is emailed |
 | Sun 9:00 AM | Morning injury news |
-| Sun 11:45 AM | 1pm inactives, kickoff weather, **Vegas props** (the only props pull) |
+| Sun 11:45 AM | 1pm inactives, kickoff weather, **Vegas props** (the only props pull); saves a snapshot |
 | Sun 3:00 PM | Late-afternoon inactives |
 
 The page header shows when each data source was last refreshed.
+
+Runs happen only during the regular season, starting about 9 days before the
+opener. They pause through the playoffs, off-season and preseason, and restart
+on their own. Details are in [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
+
+## Track record
+
+Every Friday evening and Sunday before kickoff, the rankings are frozen
+alongside the FantasyPros expert consensus at that moment (`snapshots/`). Once
+the week's games are final, a report compares both against what actually
+happened (`reports/live/`, season to date in `reports/live/SUMMARY.md`).
 
 ## Data sources (all free)
 

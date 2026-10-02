@@ -249,9 +249,12 @@ dark themes come from CSS tokens.
   the firing that lands within 50 minutes after a real ET slot. The same list
   drives the page's "Next" time. **If you change the schedule, change both
   `SCHEDULE_ET` and the crons.**
-- Each run commits `site/data/` (including `history/{season}_wNN.json`, every
-  week's published projections, for future accuracy tracking) and
-  `data/props/`.
+- Each run commits `site/data/` (including `history/{season}_wNN.json`, the
+  latest published projections for each week) and `data/props/`. The Friday
+  7:05 PM and Sunday 11:45 AM runs also write frozen snapshots for evaluation
+  (`snapshots/`, see OPERATIONS.md).
+- Scheduled runs only proceed in season: from 9 days before the first
+  regular-season game to 3 days after the last (`gate.py`).
 - **Odds API budget:** 500 credits/month free. One full-slate pull is ~4
   credits per game (~60 per week). Only the Sunday run fetches. Raw props are
   committed in `data/props/` with a `fetched_at` time; any run within 3 hours of
@@ -261,9 +264,10 @@ dark themes come from CSS tokens.
   Never add more prop markets or runs without redoing this math.
 - **Secrets:** `ODDS_API_KEY` is a repo secret; locally it lives in `.env`
   (gitignored). Never commit the key.
-- **Yearly:** after each season, rerun `scripts/backtest.py` (and add the new
-  season to its `seasons` tuple) to refresh `model_data/oos.parquet` and
-  `reports/backtest.txt`.
+- **Yearly:** automatic. `maintenance.yml` re-runs the backtest every Aug 1 on
+  the four most recent completed seasons and emails the before/after results.
+- **Live evaluation, snapshots, season on/off, keep-alive:** see
+  [`OPERATIONS.md`](OPERATIONS.md), the runbook for cadence and failure handling.
 
 ## 5. Validation (how we know it works)
 
@@ -345,3 +349,9 @@ backtest. Compare against the table above; don't ship regressions.
 | 2026-10-02 | Schedule moved to ET slots (11/week, nightly injury refresh, extra Sunday runs) + per-source freshness panel | Owner noted one "updated" time hid that props are weekly while injuries change hourly; showing per-source timestamps also surfaces the rigor under the hood |
 | 2026-10-02 | Freshness dots use green/yellow/red status instead of blue; source labels removed | Owner: blue dots were meaningless; status colors are intuitive. Shape (ring vs. filled) backs up color for accessibility |
 | 2026-10-02 | Factor key + per-factor "input this week" text on the page | Owner asked what e.g. "+1.4 Game environment" means; definitions live in `publish.FACTOR_KEY` |
+| 2026-10-02 | Frozen Friday 7:05 PM + Sunday 11:45 AM snapshots in `snapshots/`, never overwritten, with ECR saved alongside | Owner wants live accuracy tracking. Friday evening is after the final injury report (a morning snapshot would mostly test guessing the report). 11:45 rather than 11:59 because GitHub cron often starts 5–30 min late. ECR is saved at snapshot time because the nflverse feed doesn't keep every version, so a later download may not match what experts said |
+| 2026-10-02 | Evaluation drops players whose game started before the snapshot was taken | Handles London games and late cron starts without leaking in-game information |
+| 2026-10-02 | Weekly report emailed as a GitHub issue assigned to the owner | Free, no new service; owner wants it pushed to them. Self-heals: any in-season run scores unscored finished weeks |
+| 2026-10-02 | Runs active only from 9 days before the opener to 3 days after the last regular-season game; no preseason or playoffs | Model is regular-season only, fantasy leagues end by week 17/18, preseason stats are noise. Dates come from the nflverse schedule, so nothing to update yearly |
+| 2026-10-02 | Monthly keep-alive re-enables workflows | GitHub disables schedules in public repos after 60 idle days and doesn't re-enable them, which would stop the season from starting on its own |
+| 2026-10-02 | Aug 1 automatic backtest refresh on the last four completed seasons | Replaces a manual yearly step; owner wants zero upkeep |
