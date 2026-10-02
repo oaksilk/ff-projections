@@ -38,8 +38,15 @@ OUTDOOR_STADIUMS = {
 # Injury designations that mean a player will not play.
 OUT_STATUSES = {"Out", "IR", "PUP", "Sus", "NFI", "Doubtful", "COV", "DNR"}
 
-# Scheduled runs (must match .github/workflows/weekly.yml). Tue/Thu are fixed in
-# UTC; Sunday is pinned to 11:45 ET (just after inactives) via two UTC crons
-# and a time gate in the workflow, so it holds across daylight saving changes.
-SCHEDULE_UTC = [(1, 14, 0), (3, 21, 0)]  # (weekday Mon=0, hour, minute)
-SUNDAY_ET = (6, 11, 45)
+# Scheduled runs, in US Eastern time: (weekday Mon=0..Sun=6, hour, minute, fetch_props).
+# GitHub cron is UTC-only, so .github/workflows/weekly.yml lists each slot at both
+# its daylight (UTC-4) and standard (UTC-5) offset, and scripts/gate.py lets only
+# the one landing within GATE_MINUTES after a slot proceed. This list also drives
+# the page's "next update" time. Keep the workflow crons in sync with it.
+SCHEDULE_ET = [
+    (1, 10, 0, False),   # Tue 10:00  last week's stats are final
+    (6, 9, 0, False),    # Sun 9:00   morning injury news
+    (6, 11, 45, True),   # Sun 11:45  just after 1pm inactives; Vegas props
+    (6, 15, 0, False),   # Sun 3:00   after late-afternoon inactives
+] + [(d, 19, 5, False) for d in range(7)]  # nightly 7:05: injuries; TNF/SNF/MNF inactives
+GATE_MINUTES = 50

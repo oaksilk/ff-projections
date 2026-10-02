@@ -38,8 +38,30 @@ body { margin: 0; background: var(--bg); color: var(--text);
   font: 14px/1.45 Inter, system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; }
 .wrap { max-width: 1080px; margin: 0 auto; padding: 28px 16px 64px; }
 header h1 { font-size: 24px; margin: 0 0 4px; letter-spacing: -0.01em; }
-header p { margin: 0; color: var(--muted); }
-header .updated { color: var(--neg); font-weight: 600; }
+header .sub { margin: 0; color: var(--muted); }
+
+/* Data freshness panel: one anchor cell (last rebuild) + one cell per source. */
+.status { margin-top: 16px; display: grid; grid-template-columns: auto 1fr; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 12px; }
+.status .lbl { font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); }
+.status .anchor { padding: 12px 20px 12px 16px; border-right: 1px solid var(--border); }
+.status .anchor .val { color: var(--neg); font-weight: 700; font-size: 15px; margin-top: 4px; white-space: nowrap; }
+.status .anchor .nxt { color: var(--muted); font-size: 12px; margin-top: 2px; white-space: nowrap; }
+.status .srcs { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); padding: 0 4px; }
+.status .src { padding: 12px 12px; min-width: 0; cursor: help; }
+.status .src .val { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12.5px; margin-top: 5px;
+  display: flex; align-items: center; gap: 7px; white-space: nowrap; }
+.status .src .note { font-size: 11.5px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.status .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
+.status .dot.pending { background: transparent; box-shadow: inset 0 0 0 1.5px var(--faint); }
+.status .src.pending .val { color: var(--muted); }
+@media (max-width: 760px) {
+  .status { grid-template-columns: 1fr; }
+  .status .anchor { border-right: 0; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; }
+  .status .anchor .val { margin-top: 0; }
+  .status .srcs { grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 2px 4px 4px; }
+  .status .src { padding: 9px 10px; }
+}
 .num { font-family: "JetBrains Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
 
 .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 20px 0 14px; }
@@ -126,7 +148,8 @@ details.key p { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
 <div class="wrap">
   <header>
     <h1>Start/Sit Rankings</h1>
-    <p id="meta">Loading…</p>
+    <p class="sub" id="sub">Loading…</p>
+    <section class="status" id="status" aria-label="Data freshness" hidden></section>
   </header>
 
   <div class="controls">
@@ -303,13 +326,48 @@ document.getElementById("rows").onclick = e => {
 document.getElementById("cmp").onclick = e => { if (e.target.closest("[data-clear]")) { state.pick = []; render(); } };
 document.getElementById("q").oninput = e => { state.q = e.target.value; render(); };
 
+// Compact times: today → "6:02 PM", this week → "Thu 6:02 PM", older → "Oct 1".
+function shortTime(iso, { tz = false } = {}) {
+  const t = new Date(iso), now = new Date();
+  const time = t.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", ...(tz ? { timeZoneName: "short" } : {}) });
+  if (t.toDateString() === now.toDateString()) return time;
+  if (Math.abs(t - now) < 6 * 864e5) return `${t.toLocaleDateString(undefined, { weekday: "short" })} ${time}`;
+  return t.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+const shortDay = ymd => { const t = new Date(ymd + "T12:00"); return `${t.toLocaleDateString(undefined, { weekday: "short" })} ${t.getMonth() + 1}/${t.getDate()}`; };
+
+function renderStatus(d) {
+  const f = d.freshness; if (!f) return;
+  const el = document.getElementById("status");
+  const cell = (label, value, note, tip, pending) =>
+    `<div class="src${pending ? " pending" : ""}" title="${esc(tip)}"><div class="lbl">${label}</div>
+      <div class="val"><span class="dot${pending ? " pending" : ""}"></span>${esc(value)}</div><div class="note">${esc(note)}</div></div>`;
+  el.innerHTML = `
+    <div class="anchor" title="When the model last pulled every source below and rebuilt all projections">
+      <div><div class="lbl">Last rebuilt</div><div class="val">${esc(shortTime(d.generated, { tz: true }))}</div></div>
+      <div class="nxt">Next · ${esc(shortTime(f.next))}</div>
+    </div>
+    <div class="srcs">
+      ${cell("Injuries", f.injuries ? shortTime(f.injuries) : "—", "via Sleeper",
+        "Injury designations, IR and inactives. Players ruled out are removed and their targets and carries redistributed.")}
+      ${f.weather ? cell("Weather", shortTime(f.weather), `${f.outdoor_games} outdoor`,
+          "Kickoff forecast (wind, temperature) from Open-Meteo for each outdoor stadium.")
+        : cell("Weather", "Indoors", "no outdoor games", "Every game this week is under a roof.")}
+      ${cell("Game lines", f.lines ? shortTime(f.lines) : "—", "via nflverse",
+        "Spread and over/under for every game, which set each team's implied points. Time is when the lines were last published.")}
+      ${f.props ? cell("Vegas props", shortTime(f.props), `${f.props_games} games`,
+          "Player prop lines (receptions, yards, anytime TD) from DraftKings, FanDuel and other books, blended 50/50 with the model.")
+        : cell("Vegas props", shortTime(f.props_next), "arriving", "Player props are pulled once a week, Sunday at 11:45 AM ET, when lines are sharpest. Until then projections are model-only.", true)}
+      ${cell("Stats", shortDay(f.stats_through), "latest game",
+        "Play-by-play stats, snap counts and usage through the most recent completed game.")}
+    </div>`;
+  el.hidden = false;
+}
+
 fetch("data/rankings.json", { cache: "no-cache" }).then(r => r.json()).then(d => {
   data = d;
-  const fmtTime = iso => new Date(iso).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" });
-  document.getElementById("meta").innerHTML =
-    `${d.season} Week ${d.week} · RB, WR, TE · <span class="updated">updated ${esc(fmtTime(d.generated))}</span>` +
-    (d.next_update ? ` · next update ${esc(fmtTime(d.next_update))}` : "") +
-    (d.props_games ? ` · blended with Vegas props for ${d.props_games} games` : "");
+  document.getElementById("sub").textContent = `${d.season} · Week ${d.week} · RB, WR, TE`;
+  renderStatus(d);
   document.getElementById("keylist").innerHTML = (d.factor_key || []).map(f =>
     `<dt>${esc(f.label)}</dt><dd>${esc(f.text)}<br><span class="typ">This week: typically ±${f.typical.toFixed(1)} pts, up to ±${f.max.toFixed(1)}.</span></dd>`).join("");
   seg(document.getElementById("pos"), POS, "pos");

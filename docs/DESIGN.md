@@ -208,6 +208,13 @@ offers:
 - Head-to-head: samples each player's distribution 20,000 times (assumes
   independence; teammates are actually correlated)
 - A "What the factors mean" key
+- A data-freshness panel under the title: "Last rebuilt" (red) with the next
+  scheduled run, then one cell per source with its own timestamp: injuries
+  (Sleeper fetch time), weather (forecast time), game lines (nflverse's actual
+  publish time, from its GitHub release asset), Vegas props (pull time, or a
+  hollow dot and "arriving" with the next pull time) and stats (latest game
+  included). Hovering a cell explains the source. Deliberately restrained:
+  red only on the rebuild time, two dot states, no traffic-light colors.
 
 Preferences are stored in `localStorage` (wrapped in try/catch). Light and
 dark themes come from CSS tokens.
@@ -217,14 +224,19 @@ dark themes come from CSS tokens.
 - **Hosting:** public GitHub repo `oaksilk/ff-projections`; GitHub Pages at
   https://oaksilk.github.io/ff-projections/. The repo must stay public for
   free Pages.
-- **Schedule** (`.github/workflows/weekly.yml`):
-  - Tue 14:00 UTC: stats final, next week's projections
-  - Thu 21:00 UTC: practice reports
-  - Sun **11:45 ET**: just after inactives (posted ~90 min before 1pm kickoffs),
-    final weather, **Vegas props**. Cron is UTC-only, so two crons (15:45 and
-    16:45 UTC) plus a time gate in the workflow keep it at 11:45 ET across
-    daylight-saving changes. `SCHEDULE_UTC`/`SUNDAY_ET` in `config.py` must match
-    the workflow; they drive the page's "next update" time.
+- **Schedule:** defined once, in Eastern time, as `SCHEDULE_ET` in
+  `ffmodel/config.py`. There are 11 runs a week:
+  - Nightly 7:05 PM: injury news, plus Thursday/Sunday/Monday-night inactives
+  - Tue 10:00 AM: last week's stats are final
+  - Sun 9:00 AM: morning injury news
+  - Sun **11:45 AM**: just after 1pm inactives; the **only Vegas props pull**
+  - Sun 3:00 PM: after late-afternoon inactives
+
+  GitHub cron is UTC-only, so `weekly.yml` lists every slot at both its
+  daylight and standard-time UTC offset. `scripts/gate.py` lets through only
+  the firing that lands within 50 minutes after a real ET slot. The same list
+  drives the page's "Next" time. **If you change the schedule, change both
+  `SCHEDULE_ET` and the crons.**
 - Each run commits `site/data/` (including `history/{season}_wNN.json`, every
   week's published projections, for future accuracy tracking) and
   `data/props/`.
@@ -318,4 +330,5 @@ backtest. Compare against the table above; don't ship regressions.
 | 2026-10-02 | Yards prop CV 0.62/0.58 | Measured, replacing a guessed 0.85 |
 | 2026-10-02 | QB factor baseline = team's recent QB play; added `qb_upgrade` | Owner feedback on Drake London / Penix (see §3.5). Backtest was neutral (61.7% vs 61.8%, within noise); kept because it gives the model the right signal for QB returns |
 | 2026-10-02 | Sunday run moved 11:15 → 11:45 ET; page shows "updated" (red) and "next update" | Earlier run fired before inactives were posted (owner noticed via Jadarian Price going Out between runs) |
+| 2026-10-02 | Schedule moved to ET slots (11/week, nightly injury refresh, extra Sunday runs) + per-source freshness panel | Owner noted one "updated" time hid that props are weekly while injuries change hourly; showing per-source timestamps also surfaces the rigor under the hood |
 | 2026-10-02 | Factor key + per-factor "input this week" text on the page | Owner asked what e.g. "+1.4 Game environment" means; definitions live in `publish.FACTOR_KEY` |

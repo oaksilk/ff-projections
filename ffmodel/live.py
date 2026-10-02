@@ -40,6 +40,7 @@ def sleeper_players():
         r.raise_for_status()
         path.write_bytes(r.content)
     sp = pd.DataFrame(json.loads(path.read_text()).values())
+    sp.attrs["fetched_at"] = pd.Timestamp(path.stat().st_mtime, unit="s", tz="UTC").isoformat()
     sp["team"] = sp.team.replace(SLEEPER_TEAMS)
     return sp[["player_id", "full_name", "team", "position", "status", "injury_status",
                "depth_chart_order", "gsis_id"]].rename(columns={"player_id": "sleeper_id"})
@@ -63,7 +64,8 @@ def _sleeper_out(row):
 
 def availability(d, season, week, games):
     """Skill players expected to play, and pfr ids of defensive backs ruled out."""
-    sp = _id_maps(d, sleeper_players())
+    raw_sp = sleeper_players()
+    sp = _id_maps(d, raw_sp)
     sp["out"] = sp.apply(_sleeper_out, axis=1)
     inj = d["injuries"]
     inj = inj[(inj.season == season) & (inj.week == week)]
@@ -113,6 +115,7 @@ def availability(d, season, week, games):
                 db_out.add(pid)
         if gs_by_pfr.get(pid) in nfl_out:
             db_out.add(pid)
+    players.attrs["injuries_at"] = raw_sp.attrs.get("fetched_at")
     return players, db_out, sp
 
 
@@ -164,7 +167,7 @@ def _read_props(path):
 
 
 def fetch_props(season, week, games, allow_fetch):
-    """Raw props for the week, saved per week in data/props/.
+    """(fetched_at, raw events) for the week's props, saved per week in data/props/.
 
     A pull from the last 3 hours is reused even when fetching is allowed, so a
     retried or duplicate Sunday run never spends Odds API credits twice.
@@ -177,7 +180,7 @@ def fetch_props(season, week, games, allow_fetch):
     if not allow_fetch or not key or recent:
         if allow_fetch and recent:
             log.info("reusing props fetched at %s", fetched_at)
-        return saved
+        return fetched_at, saved
     events = requests.get(f"{ODDS_BASE}/events", params={"apiKey": key}, timeout=30).json()
     start = pd.to_datetime(games.gameday).min() - pd.Timedelta(days=1)
     end = pd.to_datetime(games.gameday).max() + pd.Timedelta(days=2)
@@ -193,9 +196,10 @@ def fetch_props(season, week, games, allow_fetch):
         log.info("props %s @ %s: remaining credits %s", e["away_team"], e["home_team"],
                  r.headers.get("x-requests-remaining"))
     if not out and saved:  # nothing upcoming (e.g. all games started); keep what we had
-        return saved
-    path.write_text(json.dumps({"fetched_at": pd.Timestamp.now(tz="UTC").isoformat(), "events": out}))
-    return out
+        return fetched_at, saved
+    now = pd.Timestamp.now(tz="UTC")
+    path.write_text(json.dumps({"fetched_at": now.isoformat(), "events": out}))
+    return now, out
 
 
 # Coefficient of variation used to turn an over/under line into a mean.
@@ -243,3 +247,15 @@ def market_means(raw):
     df = df.groupby(["player", "stat"]).value.median().unstack().reset_index()
     df["name_key"] = df.player.map(_norm)
     return df
+
+
+def lines_updated_at():
+    """When nflverse last published schedules (spread/total), from its release asset."""
+    try:
+        r = requests.get("https://api.github.com/repos/nflverse/nflverse-data/releases/tags/schedules",
+                         timeout=20, headers={"Accept": "application/vnd.github+json"})
+        r.raise_for_status()
+        return next(a["updated_at"] for a in r.json()["assets"] if a["name"] == "games.parquet")
+    except Exception as e:
+        log.warning("couldn't read schedules release time: %s", e)
+        return None

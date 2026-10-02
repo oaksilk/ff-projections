@@ -58,11 +58,17 @@ consensus (ECR) on the same players. Results are in `reports/backtest.txt`.
 
 ## Schedule
 
-| When (ET) | What updates |
+All times are Eastern; the source of truth is `SCHEDULE_ET` in `ffmodel/config.py`.
+
+| When | What updates |
 |---|---|
-| Tue morning | Last week's results are final; projections for the new week |
-| Thu afternoon | Practice reports and injury designations |
-| Sun ~11am | Inactives, kickoff weather and Vegas props |
+| Nightly 7:05 PM | Injury news; Thu/Sun/Mon-night inactives |
+| Tue 10:00 AM | Last week's stats are final |
+| Sun 9:00 AM | Morning injury news |
+| Sun 11:45 AM | 1pm inactives, kickoff weather, **Vegas props** (the only props pull) |
+| Sun 3:00 PM | Late-afternoon inactives |
+
+The page header shows when each data source was last refreshed.
 
 ## Data sources (all free)
 
