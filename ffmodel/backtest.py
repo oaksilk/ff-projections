@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
-from .data import load_ecr
+from .data import current_season, load_ecr
 from .model import QUANTILES, Distribution, Projector, add_distribution, oos_frame
 
 TOP_N = {"WR": 48, "RB": 36, "TE": 18}
@@ -43,8 +43,14 @@ def _pairwise(score, actual):
     return np.mean(np.sign(s[i] - s[j])[keep] == np.sign(a[i] - a[j])[keep])
 
 
-def run(df, d, seasons=(2022, 2023, 2024, 2025), retrain_every=6):
-    """Walk-forward: retrain every few weeks on everything before that week."""
+def run(df, d, seasons=None, retrain_every=6):
+    """Walk-forward: retrain every few weeks on everything before that week.
+
+    Defaults to the four most recent completed seasons (2022–2025 during 2026).
+    """
+    if seasons is None:
+        last = current_season() - 1
+        seasons = tuple(range(last - 3, last + 1))
     ecr = ecr_by_week(d)
     hist = df[~df.live]
     preds, oos = [], []

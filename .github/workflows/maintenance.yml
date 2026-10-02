@@ -1,0 +1,85 @@
+name: Maintenance
+
+# Off-season upkeep, so the system restarts on its own each season. See docs/OPERATIONS.md.
+on:
+  schedule:
+    - cron: "0 16 1 * *"     # monthly keep-alive
+    - cron: "0 14 1 8 *"     # Aug 1: refresh the backtest with last season's data
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "What to run"
+        type: choice
+        options: [keepalive, refresh, test-email]
+        default: keepalive
+
+permissions:
+  contents: write
+  actions: write
+  issues: write
+
+jobs:
+  # GitHub disables scheduled workflows in public repos after 60 days without repo
+  # activity, and a disabled schedule does not come back by itself. Re-enabling each
+  # workflow monthly resets that clock through the off-season.
+  keepalive:
+    if: github.event.schedule == '0 16 1 * *' || inputs.task == 'keepalive'
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          for wf in weekly.yml maintenance.yml; do
+            gh api -X PUT "repos/$REPO/actions/workflows/$wf/enable"
+          done
+
+  # Retrain the range/boom calibration and re-score the backtest on the most recent four
+  # seasons (~20-40 min). Commits the results and emails a summary so the owner can see
+  # whether the refreshed model held up.
+  refresh:
+    if: github.event.schedule == '0 14 1 8 *' || inputs.task == 'refresh'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: cp reports/backtest.txt /tmp/backtest_before.txt
+      - run: python scripts/backtest.py
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          git config user.name "rankings-bot"
+          git config user.email "rankings-bot@users.noreply.github.com"
+          git add model_data/oos.parquet reports/backtest.txt
+          git diff --cached --quiet || git commit -m "Annual backtest refresh"
+          git pull --rebase
+          git push
+          {
+            echo "The yearly refresh re-ran the backtest on the last four completed seasons."
+            echo "Compare the ALL row: model_pair is our start/sit accuracy, ecr_pair is the experts'."
+            echo "If ours dropped noticeably or fell below the experts, ask Claude to look into it before the season."
+            echo; echo "### After"; echo '```'; cat reports/backtest.txt; echo '```'
+            echo; echo "### Before"; echo '```'; cat /tmp/backtest_before.txt; echo '```'
+          } > /tmp/body.md
+          gh issue create --title "Annual model refresh: $(date +%Y) backtest results" \
+            --body-file /tmp/body.md --assignee "$OWNER"
+
+  # Sends one test issue so the owner can confirm GitHub emails reach them.
+  test-email:
+    if: inputs.task == 'test-email'
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          gh issue create --repo "$REPO" --assignee "$OWNER" \
+            --title "Test: weekly report email" \
+            --body "If this reached your inbox, the Tuesday reports will too. You can close this issue."

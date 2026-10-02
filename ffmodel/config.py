@@ -55,3 +55,11 @@ GATE_MINUTES = 50
 # Friday after the final injury report, Sunday just before the 1pm kickoffs.
 SNAPSHOT_SLOTS = {(4, 19, 5): "fri", (6, 11, 45): "sun"}
 SNAPSHOT_DIR = ROOT / "snapshots"
+
+# Active season window: scheduled runs only proceed from SEASON_LEAD_DAYS before the
+# first regular-season game until SEASON_TAIL_DAYS after the last one (time for the
+# final Tuesday evaluation). Preseason and playoffs are skipped. Dates come from the
+# nflverse schedule, so nothing needs updating year to year.
+SEASON_LEAD_DAYS = 9
+SEASON_TAIL_DAYS = 3
+SCHEDULE_CSV = "https://github.com/nflverse/nfldata/raw/master/data/games.csv"

@@ -31,6 +31,7 @@ permissions:
   contents: write
   pages: write
   id-token: write
+  issues: write
 
 concurrency:
   group: rankings
@@ -93,3 +94,44 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+
+  # Score any finished week that has snapshots but no report, then email the report to the
+  # repo owner as a GitHub issue. Runs on every in-season slot, so a missed Tuesday heals
+  # itself on the next run. Separate job so a failure here never blocks the rankings deploy.
+  evaluate:
+    needs: build
+    if: needs.build.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - id: check
+        run: python3 scripts/evaluate.py --pending | tee -a "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@v5
+        if: steps.check.outputs.pending == 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+      - if: steps.check.outputs.pending == 'true'
+        run: pip install -r requirements.txt
+      - name: Score finished weeks
+        if: steps.check.outputs.pending == 'true'
+        run: python scripts/evaluate.py
+      - name: Save reports and email them
+        if: steps.check.outputs.pending == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          [ -s reports/live/.new ] || { echo "no week ready yet"; exit 0; }
+          git config user.name "rankings-bot"
+          git config user.email "rankings-bot@users.noreply.github.com"
+          git add reports/live
+          git commit -m "Weekly evaluation report"
+          git pull --rebase
+          git push
+          while read -r f; do
+            gh issue create --title "$(head -1 "$f" | sed 's/^# //')" --body-file "$f" --assignee "$OWNER"
+          done < reports/live/.new

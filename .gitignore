@@ -4,3 +4,4 @@ data/cache/
 __pycache__/
 .DS_Store
 .claude/
+reports/live/.new
