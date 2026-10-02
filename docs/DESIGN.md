@@ -208,13 +208,25 @@ offers:
 - Head-to-head: samples each player's distribution 20,000 times (assumes
   independence; teammates are actually correlated)
 - A "What the factors mean" key
-- A data-freshness panel under the title: "Last rebuilt" (red) with the next
+- A data-freshness panel under the title: "Last rebuilt" with the next
   scheduled run, then one cell per source with its own timestamp: injuries
   (Sleeper fetch time), weather (forecast time), game lines (nflverse's actual
-  publish time, from its GitHub release asset), Vegas props (pull time, or a
-  hollow dot and "arriving" with the next pull time) and stats (latest game
-  included). Hovering a cell explains the source. Deliberately restrained:
-  red only on the rebuild time, two dot states, no traffic-light colors.
+  publish time, from its GitHub release asset), Vegas props (pull time, or the
+  next pull time while waiting) and stats (latest game included). Each has a
+  status dot, computed in the browser at view time so an open tab ages
+  honestly:
+  - **Green (filled):** current for that source's cadence. Run-refreshed
+    sources are green if under 26h old, i.e. a nightly run happened.
+  - **Yellow (hollow ring):** waiting/on schedule. Props before Sunday's pull;
+    games played but stats not yet ingested; a source 26–50h old; a run a
+    little late.
+  - **Red (filled):** stale. Over 50h old, a missed scheduled run, or a missed
+    props pull.
+
+  Hovering a cell gives the state and an explanation. There's no other color
+  in the panel and no source labels (the owner removed them for clarity).
+  "Last rebuilt" text is neutral; its dot carries the status (red text would
+  read as an alarm). Thresholds live in `sourceStates()` in `index.html`.
 
 Preferences are stored in `localStorage` (wrapped in try/catch). Light and
 dark themes come from CSS tokens.
@@ -331,4 +343,5 @@ backtest. Compare against the table above; don't ship regressions.
 | 2026-10-02 | QB factor baseline = team's recent QB play; added `qb_upgrade` | Owner feedback on Drake London / Penix (see §3.5). Backtest was neutral (61.7% vs 61.8%, within noise); kept because it gives the model the right signal for QB returns |
 | 2026-10-02 | Sunday run moved 11:15 → 11:45 ET; page shows "updated" (red) and "next update" | Earlier run fired before inactives were posted (owner noticed via Jadarian Price going Out between runs) |
 | 2026-10-02 | Schedule moved to ET slots (11/week, nightly injury refresh, extra Sunday runs) + per-source freshness panel | Owner noted one "updated" time hid that props are weekly while injuries change hourly; showing per-source timestamps also surfaces the rigor under the hood |
+| 2026-10-02 | Freshness dots use green/yellow/red status instead of blue; source labels removed | Owner: blue dots were meaningless; status colors are intuitive. Shape (ring vs. filled) backs up color for accessibility |
 | 2026-10-02 | Factor key + per-factor "input this week" text on the page | Owner asked what e.g. "+1.4 Game environment" means; definitions live in `publish.FACTOR_KEY` |

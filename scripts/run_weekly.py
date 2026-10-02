@@ -101,6 +101,9 @@ def main():
         "props_next": next_run(props_only=True),
         "stats_week": int(ps[(ps.season == season) & (ps.season_type == "REG")].week.max()),
         "stats_through": stats_through,
+        # Latest completed game on the schedule (stats can lag it by a day or so).
+        "games_through": sched[(sched.season == season) & (sched.game_type == "REG")
+                               & sched.result.notna()].gameday.max(),
     }
     payload = publish.to_json(pred, reasons, players, games, season, week,
                               {"weather": weather, "props_games": len(raw), "freshness": freshness}, ctx)
