@@ -21,6 +21,11 @@ on:
         description: "Fetch Vegas props (spends Odds API credits unless pulled in the last 3 hours)"
         type: boolean
         default: false
+      snapshot:
+        description: "Also save a frozen evaluation snapshot (never overwrites an existing one)"
+        type: choice
+        options: [none, fri, sun]
+        default: none
 
 permissions:
   contents: write
@@ -44,6 +49,7 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           MANUAL_PROPS: ${{ inputs.props }}
+          MANUAL_SNAPSHOT: ${{ inputs.snapshot }}
         run: python3 scripts/gate.py | tee -a "$GITHUB_OUTPUT"
       - uses: actions/setup-python@v5
         if: steps.gate.outputs.run == 'true'
@@ -57,18 +63,19 @@ jobs:
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           CACHE_HOURS: "0"
+          PROPS: ${{ steps.gate.outputs.props }}
+          SNAPSHOT: ${{ steps.gate.outputs.snapshot }}
         run: |
-          if [ "${{ steps.gate.outputs.props }}" = "true" ]; then
-            python scripts/run_weekly.py --props
-          else
-            python scripts/run_weekly.py
-          fi
+          args=()
+          [ "$PROPS" = "true" ] && args+=(--props)
+          [ -n "$SNAPSHOT" ] && args+=(--snapshot "$SNAPSHOT")
+          python scripts/run_weekly.py "${args[@]}"
       - name: Save history
         if: steps.gate.outputs.run == 'true'
         run: |
           git config user.name "rankings-bot"
           git config user.email "rankings-bot@users.noreply.github.com"
-          git add site/data data/props
+          git add site/data data/props snapshots
           git diff --cached --quiet || git commit -m "Rankings update $(date -u +%F)"
           git push
       - uses: actions/upload-pages-artifact@v3

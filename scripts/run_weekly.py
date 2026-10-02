@@ -1,7 +1,8 @@
 """Build this week's rankings and write site/data/rankings.json.
 
-Usage: python scripts/run_weekly.py [--props]
-  --props   fetch Vegas player props (spends ~4 Odds API credits per game)
+Usage: python scripts/run_weekly.py [--props] [--snapshot LABEL]
+  --props            fetch Vegas player props (spends ~4 Odds API credits per game)
+  --snapshot LABEL   also save a frozen snapshot (fri/sun) for weekly evaluation
 """
 import argparse
 import datetime as dt
@@ -15,7 +16,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from ffmodel import live as lv, publish
+from ffmodel import live as lv, publish, snapshot
 from ffmodel.config import ROOT, SCHEDULE_ET
 from ffmodel.data import load_all
 from ffmodel.features import build_features
@@ -47,6 +48,7 @@ def load_env():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--props", action="store_true")
+    ap.add_argument("--snapshot", choices=["fri", "sun"])
     args = ap.parse_args()
     load_env()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -109,6 +111,8 @@ def main():
                               {"weather": weather, "props_games": len(raw), "freshness": freshness}, ctx)
     publish.write(payload, season, week)
     log.info("wrote %d players", len(payload["players"]))
+    if args.snapshot:
+        snapshot.save(payload, args.snapshot, d["ff_ids"])
 
 
 if __name__ == "__main__":

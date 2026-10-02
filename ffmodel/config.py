@@ -50,3 +50,8 @@ SCHEDULE_ET = [
     (6, 15, 0, False),   # Sun 3:00   after late-afternoon inactives
 ] + [(d, 19, 5, False) for d in range(7)]  # nightly 7:05: injuries; TNF/SNF/MNF inactives
 GATE_MINUTES = 50
+
+# Slots whose run also saves a frozen snapshot for weekly evaluation (see docs/OPERATIONS.md):
+# Friday after the final injury report, Sunday just before the 1pm kickoffs.
+SNAPSHOT_SLOTS = {(4, 19, 5): "fri", (6, 11, 45): "sun"}
+SNAPSHOT_DIR = ROOT / "snapshots"
