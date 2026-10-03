@@ -106,15 +106,25 @@ Every row is a player in a game. Feature families:
 - **Opponent defense:** lagged fantasy points and targets allowed to each
   position, EPA per dropback allowed, yards per carry and per target allowed,
   plays faced, pass rate faced, points allowed (`def_` prefix).
-- **QB:** starting QB's EWMA EPA per dropback (`qb_epa`), career games,
+- **QB:** the schedule's listed starter (`home_qb_id`/`away_qb_id`), never
+  "who threw the most passes" (that can be an in-game replacement). Note
+  nflverse fills this with whoever actually started, so a surprise start is
+  still known in hindsight; that is rare and usually public by Friday.
+  Features: the starter's EWMA EPA per dropback (`qb_epa`), career games,
   `qb_change` (different starter than last game), and `qb_upgrade`
   (`qb_epa` minus the team's recent passing EPA, i.e. "is this QB better than
   the QB play behind this player's recent stats").
 - **Absences:** `vac_tgt` and `vac_car` are the recent target and carry
   shares of teammates who are out. `db_out_n` and `db_out_share` count
   opposing regular defensive backs (≥50% of snaps recently) who are out.
-  Training infers "out" from snap counts (on the team in the last 3 games but
-  didn't play); live uses injury reports and Sleeper status.
+  "Out" means known unavailable **before kickoff**, never "took no snaps".
+  Historical rows use one of two information sets (`features.INFO_SETS`):
+  - **friday:** injury report Out/Doubtful, or not on the team's weekly
+    roster as active/inactive (IR, released, traded, suspended...).
+  - **sunday:** friday plus gameday inactives (`INA`, nflverse 2019+; earlier
+    seasons fall back to friday).
+  Live rows use injury reports and Sleeper status at run time. A player
+  flagged out who played anyway doesn't count his own share as vacated.
 - **Weather:** temperature and wind (domes set to 70°F with no wind).
 - **Own health:** injury report status and practice participation.
 
@@ -274,30 +284,59 @@ dark themes come from CSS tokens.
 `scripts/backtest.py` replays 2022–2025, retraining every 6 weeks on
 everything before that week, and compares against FantasyPros weekly expert
 consensus rankings (ECR, the Friday snapshot archived by nflverse). Only
-players who were ranked by ECR *and* played are compared, so the model gets no
-credit for knowing about inactives.
+players who were ranked by ECR *and* played are compared. It runs twice, once
+per information set (§3.1): **FRIDAY** is the fair comparison with Friday
+ECR; **SUNDAY** matches the live 11:45 run but knows inactives the experts
+didn't. Full output: `reports/backtest.txt` (~80–90 min to regenerate).
 
-Main metric: **pairwise accuracy**. Over all pairs of top players (top 48 WR,
-36 RB, 18 TE by ECR) in a week, the share where the ranking ordered them the
-same as actual PPR points. This is literally start/sit accuracy.
+**Main metric: pairwise accuracy.** Over all pairs of the experts' top 48 WR,
+36 RB and 18 TE in a week, the share where the forecast put the higher PPR
+scorer first. Tied forecasts get half credit. Each position-week counts
+equally. Differences come with 95% intervals from resampling whole weeks.
 
-Results at launch (`reports/backtest.txt` has the latest; adding `qb_upgrade`
-moved the overall figure to 61.7%):
+Results (rerun 2026-10-03 after removing postgame information, §7):
 
-| | Model | Expert consensus | Recent-average baseline |
-|---|---|---|---|
-| All | 61.8% | 61.6% | ~58% |
-| RB | 63.2% | 63.0% | |
-| TE | 61.0% | 60.0% | |
-| WR | 61.1% | 61.9% | |
+| PPR, 2022–2025 | Model | Experts | Recent average | Model+ECR blend |
+|---|---|---|---|---|
+| All (FRIDAY info) | 61.6% | 61.7% | 59.3% | 62.0% |
+| All (SUNDAY info) | 61.7% | 61.7% | 59.3% | 62.1% |
+| RB (FRIDAY) | 62.8% | 63.1% | | |
+| TE (FRIDAY) | 60.8% | 60.0% | | |
+| WR (FRIDAY) | 61.2% | 62.0% | | |
+| Close calls, within 5 expert places (FRIDAY) | 54.6% | 53.9% | 51.0% | 54.6% |
 
-Boom % is well calibrated (predicted 22% → actual 21%; 38% → 39%). The
-10/25/50/75/90 percentiles hold within about 1 point for players projected
-8+ points.
+**What this supports, in plain words:**
 
-Experiments that informed the design (2025 holdout): in-season retraining
-helped (+0.7 pts pairwise); stronger regularization +0.3; averaging the
-component and direct models +0.2. Fewer features hurt.
+- The model is **statistically tied with expert consensus** (FRIDAY: −0.08
+  points, 95% interval −0.66 to +0.46). It does not beat the experts. It does
+  clearly beat a recent-average baseline (+2.3 points).
+- **WR is genuinely behind** the experts (−0.84, interval −1.52 to −0.17).
+- **The model + ECR blend** (equal-weight average of the two ranks, fixed
+  before this run) is slightly but measurably ahead of the experts: +0.32
+  (interval +0.04 to +0.60) on FRIDAY. Caveat: the external review had
+  already computed this on the old features, so it is not a pristine
+  pre-registration. The live scorecard tests it going forward.
+- **Close calls are close to coin flips for everyone** (51–55%). The 61–62%
+  headline is not the chance of getting a tough lineup question right.
+- Same picture in half-PPR and standard, and on cross-position flex pairs.
+- Removing the leaks barely moved the numbers (old report: 61.7% vs 61.6%).
+- Inactive information adds little: SUNDAY vs FRIDAY is +0.1 point.
+
+**Ranges** (now validated chronologically: each season's range model learns
+only from earlier seasons, with 2020–2021 as warm-up): for players projected
+8+ points the 10–90% range holds 80.0% of outcomes (target 80%) and the
+median is unbiased (49.8% below). For all players, including fringe ones,
+ranges are a bit wide (86%).
+
+**Boom %** is slightly optimistic in the middle (says 24%, happens ~22%).
+
+**Head-to-head %** is overconfident for lopsided pairs: when it says 74%,
+the favorite wins ~71%; when it says 92%, ~72–74%. Close pairs are well
+calibrated.
+
+**Not tested:** the Vegas prop blend (no free historical props) and the
+timing of historical game lines and weather (no timestamps). The live
+numbers include the prop blend, so they are *not* validated by this table.
 
 **Rule for changes:** any change to features or models must be followed by a
 backtest. Compare against the table above; don't ship regressions.
@@ -355,3 +394,11 @@ backtest. Compare against the table above; don't ship regressions.
 | 2026-10-02 | Runs active only from 9 days before the opener to 3 days after the last regular-season game; no preseason or playoffs | Model is regular-season only, fantasy leagues end by week 17/18, preseason stats are noise. Dates come from the nflverse schedule, so nothing to update yearly |
 | 2026-10-02 | Monthly keep-alive re-enables workflows | GitHub disables schedules in public repos after 60 idle days and doesn't re-enable them, which would stop the season from starting on its own |
 | 2026-10-02 | Aug 1 automatic backtest refresh on the last four completed seasons | Replaces a manual yearly step; owner wants zero upkeep |
+| 2026-10-03 | External review saved (`docs/reviews/2026-10-02-external-review.md`); fixing in phases | Graded C+ (modeling B). Owner agreed with nearly all of it |
+| 2026-10-03 | Historical starting QB = schedule's listed starter, not most pass attempts | Most-attempts picked in-game replacements: postgame information (105 of 2,174 team-games, 2022–2025) |
+| 2026-10-03 | Absences use pregame status (injury report, weekly roster status, gameday inactives), not "took no snaps"; two information sets, FRIDAY and SUNDAY | "Didn't play" isn't knowable before kickoff. FRIDAY is the fair comparison with Friday ECR; SUNDAY matches the live 11:45 run |
+| 2026-10-03 | Pairwise metric gives tied forecasts half credit; added close calls, points lost, flex, all formats, week-bootstrap 95% intervals, pinball loss, H2H calibration | Zero credit for ties unfairly penalized blends; headline accuracy alone overstated how useful the model is on hard calls |
+| 2026-10-03 | Range model validated chronologically (train on earlier seasons only, 2020–2021 warm-up) | Leave-one-season-out let 2022 ranges learn from 2023–2025 |
+| 2026-10-03 | Model+ECR equal-weight rank blend added as a graded candidate (not published) | Defined before the rerun; it is the only candidate measurably ahead of the experts |
+| 2026-10-03 | Backtest wording changed to "statistically tied with consensus" | The 95% interval for model − experts includes zero |
+

@@ -152,25 +152,61 @@ def build_team_games(d, games):
     return t
 
 
-def starting_qbs(d):
+def qb_games(d):
+    """Per-game passing efficiency for every QB who dropped back."""
     ps = d["player_stats"]
     qb = ps[(ps.season_type == "REG") & (ps.attempts > 0)].copy()
     qb["dropbacks"] = qb.attempts + qb.sacks_suffered.fillna(0)
     qb["epa_db"] = qb.passing_epa / qb.dropbacks.clip(lower=1)
-    starters = qb.sort_values("attempts").drop_duplicates(["season", "week", "team"], keep="last")
-    return qb, starters[["season", "week", "team", "player_id"]].rename(columns={"player_id": "qb_id"})
+    return qb
+
+
+# ---------------------------------------------------------------- availability
+
+# Information sets: what is known about who plays at forecast time.
+#   friday: the final injury report (Out/Doubtful) and reserve/IR lists.
+#   sunday: friday plus gameday inactives (announced ~90 min before kickoff).
+INFO_SETS = ("friday", "sunday")
+AVAILABLE_STATUS = {"friday": {"ACT", "INA"}, "sunday": {"ACT"}}
+INJURY_OUT = {"Out", "Doubtful"}
+
+
+def pregame_available(d, info):
+    """(gsis_id, season, week, team) of players expected to be available, using
+    only pregame information: weekly roster status plus the injury report.
+
+    A player not listed on a team's weekly roster with an available status
+    (released, traded, IR, suspended, ...) is not available for that team.
+    Gameday inactives (INA) only exist in nflverse from 2019; earlier Sunday
+    rows fall back to the Friday information.
+    """
+    if info not in INFO_SETS:
+        raise ValueError(f"info must be one of {INFO_SETS}")
+    r = d["rosters"]
+    r = r[r.gsis_id.notna()].drop_duplicates(["gsis_id", "season", "week"])
+    avail = r[r.status.isin(AVAILABLE_STATUS[info])][["gsis_id", "season", "week", "team"]]
+    inj = d["injuries"]
+    out = inj[inj.report_status.isin(INJURY_OUT)][["gsis_id", "season", "week"]].drop_duplicates()
+    avail = avail.merge(out.assign(inj_out=1), on=["gsis_id", "season", "week"], how="left")
+    covered = r[["season", "week", "team"]].drop_duplicates()  # team-weeks with roster data
+    return avail[avail.inj_out.isna()].drop(columns="inj_out"), covered
 
 
 # ---------------------------------------------------------------- absences
 
-def _absences(appear, value_cols, live_present=None, min_value=None, lookback=3):
+def _absences(appear, value_cols, is_out, min_value=None, lookback=3):
     """For each team-game, sum the recent-role values of players who were
-    around in the last `lookback` team games but are absent from this one.
+    around in the last `lookback` team games and are known before kickoff
+    not to play in this one.
 
     appear: rows (pid, team, team_game_idx, <value_cols>) where the values are
             the player's role *as of and including* that game.
-    live_present: rows (pid, team, team_game_idx) of players expected to play in
-            upcoming games; candidates for those games not in it are absent.
+    is_out: function of candidate rows (pid, team, target_idx) returning a
+            boolean Series, True where the player is known to be unavailable.
+            It must only use pregame information; whether the player actually
+            took a snap is *not* pregame information.
+
+    Returns (team-game totals, the absent candidate rows).
     """
     cands = []
     for k in range(1, lookback + 1):
@@ -178,24 +214,48 @@ def _absences(appear, value_cols, live_present=None, min_value=None, lookback=3)
         c["target_idx"] = c.team_game_idx + k
         cands.append(c)
     c = pd.concat(cands).sort_values("team_game_idx")
-    c = c.drop_duplicates(["pid", "team", "target_idx"], keep="last")
-    present = appear[["pid", "team", "team_game_idx"]]
-    if live_present is not None:
-        present = pd.concat([present, live_present[["pid", "team", "team_game_idx"]]])
-    present = present.rename(columns={"team_game_idx": "target_idx"}).assign(here=1)
-    c = c.merge(present.drop_duplicates(), on=["pid", "team", "target_idx"], how="left")
-    absent = c[c.here.isna()]
+    c = c.drop_duplicates(["pid", "team", "target_idx"], keep="last").reset_index(drop=True)
+    absent = c[is_out(c).to_numpy()]
     if min_value is not None:
         absent = absent[absent[value_cols[0]] >= min_value]
     out = absent.groupby(["team", "target_idx"])[value_cols].agg(["sum", "count"])
     out.columns = [f"{a}_{b}" for a, b in out.columns]
-    return out.reset_index().rename(columns={"target_idx": "team_game_idx"})
+    absent = absent.drop(columns="team_game_idx").rename(columns={"target_idx": "team_game_idx"})
+    return out.reset_index().rename(columns={"target_idx": "team_game_idx"}), absent
+
+
+def _out_checker(games, avail, covered, live_out):
+    """Build an `is_out` function for _absences.
+
+    Completed games: out unless listed as available (pregame_available) for
+    that team and week; team-weeks with no roster data count nobody out.
+    Upcoming games: out if (pid, team, team_game_idx) is in `live_out`.
+    """
+    idx = games[["team", "team_game_idx", "season", "week", "completed"]].rename(
+        columns={"team_game_idx": "target_idx"})
+    av = set(zip(avail.pid, avail.team, avail.season, avail.week))
+    cov = set(zip(covered.team, covered.season, covered.week))
+    lo = set() if live_out is None else set(zip(live_out.pid, live_out.team, live_out.team_game_idx))
+
+    def is_out(c):
+        m = c[["pid", "team", "target_idx"]].merge(idx, on=["team", "target_idx"], how="left")
+        hist = m.completed.fillna(False).astype(bool).to_numpy()
+        keys = zip(m.pid, m.team, m.season, m.week)
+        hist_out = np.array([(t, s, w) in cov and (p, t, s, w) not in av
+                             for p, t, s, w in keys], dtype=bool)
+        live = np.array([k in lo for k in zip(m.pid, m.team, m.target_idx)], dtype=bool)
+        return pd.Series(np.where(hist, hist_out, live), index=c.index)
+    return is_out
 
 
 # ---------------------------------------------------------------- main
 
-def build_features(d, live_players=None, live_def_out=None, weather_override=None):
+def build_features(d, live_players=None, live_def_out=None, weather_override=None, info="sunday"):
     """Return one row per player-game with features and (if played) labels.
+
+    info: which pregame availability information historical rows use
+          ("friday" or "sunday", see INFO_SETS). Live rows use whatever the
+          live injury/inactive sources say at run time.
 
     live_players: DataFrame (player_id, team, season, week, position,
                   inj_report, inj_practice) of players expected to play upcoming.
@@ -299,13 +359,13 @@ def build_features(d, live_players=None, live_def_out=None, weather_override=Non
     dg = pd.concat([dg[["season", "week", "team"]], dfe], axis=1).rename(columns={"team": "opp"})
 
     # ---- QB: who starts and how good he has been
-    qb, starters = starting_qbs(d)
-    tg = tg.merge(starters, on=["season", "week", "team"], how="left")
-    live_qb = tg.qb_id.isna() & tg.starter_qb_sched.notna() & ~tg.completed
-    tg.loc[live_qb, "qb_id"] = tg.loc[live_qb, "starter_qb_sched"]
+    # The schedule's listed starter, never "who threw the most passes" (that can
+    # be an in-game injury replacement or a benching: postgame information).
+    qb = qb_games(d)
+    tg["qb_id"] = tg.starter_qb_sched
     tg["qb_change"] = (tg.groupby("team").qb_id.shift(1) != tg.qb_id).astype(int)
-    qrows = pd.concat([qb[["player_id", "season", "week", "epa_db", "dropbacks"]],
-                       tg.loc[live_qb, ["qb_id", "season", "week"]].rename(columns={"qb_id": "player_id"})])
+    starts = tg.loc[tg.qb_id.notna(), ["qb_id", "season", "week"]].rename(columns={"qb_id": "player_id"})
+    qrows = pd.concat([qb[["player_id", "season", "week", "epa_db", "dropbacks"]], starts])
     qrows = qrows.drop_duplicates(["player_id", "season", "week"]).sort_values(["player_id", "season", "week"]).reset_index(drop=True)
     qrows["qb_epa"] = _lag_ewm(qrows, "player_id", ["epa_db"], 10, "")["epa_db"]
     qrows["qb_games"] = qrows.groupby("player_id").cumcount()
@@ -313,31 +373,53 @@ def build_features(d, live_players=None, live_def_out=None, weather_override=Non
                   on=["qb_id", "season", "week"], how="left")
 
     # ---- absences: teammates (vacated opportunity) and opposing secondary
+    # "Absent" means known unavailable before kickoff (injury report, roster
+    # status, and for the Sunday set gameday inactives), never "took no snaps".
+    avail, covered = pregame_available(d, info)
+    avail = avail.rename(columns={"gsis_id": "pid"})
     appear = pg[~pg.live][["player_id", "team", "team_game_idx"]].rename(columns={"player_id": "pid"})
     role = _lag_ewm(pg, "player_id", ["target_share", "carry_share"], 3, "", lag=False)
     appear = appear.join(role)
-    live_present = None
+    live_out = None
     if live_players is not None and len(live_players):
-        live_present = pg[pg.live][["player_id", "team", "team_game_idx"]].rename(columns={"player_id": "pid"})
-    vac = _absences(appear, ["target_share", "carry_share"], live_present)
+        # Upcoming games: recent teammates not in the expected-active list are out.
+        nxt = games[~games.completed][["team", "team_game_idx"]]
+        live_present = set(zip(pg.loc[pg.live, "player_id"], pg.loc[pg.live, "team"],
+                               pg.loc[pg.live, "team_game_idx"]))
+        cand = appear[["pid", "team"]].drop_duplicates().merge(nxt, on="team")
+        keep = [k not in live_present for k in zip(cand.pid, cand.team, cand.team_game_idx)]
+        live_out = cand[keep]
+    vac, gone = _absences(appear, ["target_share", "carry_share"],
+                          _out_checker(games, avail, covered, live_out))
     vac = vac.rename(columns={"target_share_sum": "vac_tgt", "carry_share_sum": "vac_car"})[
         ["team", "team_game_idx", "vac_tgt", "vac_car"]]
     tg = tg.merge(vac, on=["team", "team_game_idx"], how="left")
     tg[["vac_tgt", "vac_car"]] = tg[["vac_tgt", "vac_car"]].fillna(0)
+    # A player flagged out who played anyway (e.g. Doubtful) must not count his
+    # own share as vacated in his own row.
+    own = gone.rename(columns={"pid": "player_id", "target_share": "own_tgt", "carry_share": "own_car"})[
+        ["player_id", "team", "team_game_idx", "own_tgt", "own_car"]]
 
     sn = d["snaps"]
     dbs = sn[(sn.game_type == "REG") & sn.position.isin(DB_POSITIONS) & (sn.defense_snaps > 0)]
     dbs = dbs.merge(games[["season", "week", "team", "team_game_idx"]], on=["season", "week", "team"])
     dbs = dbs.rename(columns={"pfr_player_id": "pid"}).sort_values(["pid", "season", "week"]).reset_index(drop=True)
     dbs["def_pct"] = _lag_ewm(dbs, "pid", ["defense_pct"], 3, "", lag=False)["defense_pct"]
-    live_db = None
+    live_db_out = None
     if live_def_out is not None:
-        # Upcoming games: every recent DB plays unless ruled out.
-        nxt = games[~games.completed].groupby("team").team_game_idx.min().rename("nxt").reset_index()
-        cand = dbs.merge(nxt, on="team")
-        cand = cand[(cand.team_game_idx >= cand.nxt - 3) & ~cand.pid.isin(live_def_out)]
-        live_db = cand[["pid", "team", "nxt"]].rename(columns={"nxt": "team_game_idx"}).drop_duplicates()
-    dba = _absences(dbs[["pid", "team", "team_game_idx", "def_pct"]], ["def_pct"], live_db, min_value=0.5)
+        # Upcoming games: a recent DB is out only if ruled out (or gone from the team).
+        nxt = games[~games.completed][["team", "team_game_idx"]]
+        cand = dbs[["pid", "team"]].drop_duplicates().merge(nxt, on="team")
+        live_db_out = cand[cand.pid.isin(live_def_out)]
+    # DB snap data is keyed by PFR id; roster status by GSIS id.
+    pfr2gsis = d["players"][["pfr_id", "gsis_id"]].dropna().drop_duplicates("pfr_id")
+    db_avail = avail.merge(pfr2gsis, left_on="pid", right_on="gsis_id")
+    db_avail = db_avail.drop(columns=["pid", "gsis_id"]).rename(columns={"pfr_id": "pid"})
+    # DBs we can't map to a GSIS id are never counted out (no pregame status to go on).
+    unmapped = set(dbs.pid) - set(pfr2gsis.pfr_id)
+    db_check = _out_checker(games, db_avail, covered, live_db_out)
+    dba, _ = _absences(dbs[["pid", "team", "team_game_idx", "def_pct"]], ["def_pct"],
+                       lambda c: db_check(c) & ~c.pid.isin(unmapped), min_value=0.5)
     dba = dba.rename(columns={"def_pct_sum": "db_out_share", "def_pct_count": "db_out_n"})
     dba = dba.merge(games[["team", "team_game_idx", "season", "week"]], on=["team", "team_game_idx"])
     dba = dba.rename(columns={"team": "opp"})[["season", "week", "opp", "db_out_share", "db_out_n"]]
@@ -346,6 +428,10 @@ def build_features(d, live_players=None, live_def_out=None, weather_override=Non
     tkeep = ["season", "week", "team", "qb_id", "qb_change", "qb_epa", "qb_games", "vac_tgt", "vac_car"] + \
             [f"tm_{c}" for c in tcols]
     pg = pg.merge(tg[tkeep], on=["season", "week", "team"], how="left")
+    pg = pg.merge(own, on=["player_id", "team", "team_game_idx"], how="left")
+    pg["vac_tgt"] = (pg.vac_tgt - pg.own_tgt.fillna(0)).clip(lower=0)
+    pg["vac_car"] = (pg.vac_car - pg.own_car.fillna(0)).clip(lower=0)
+    pg = pg.drop(columns=["own_tgt", "own_car"])
     pg = pg.merge(dg, on=["season", "week", "opp"], how="left")
     pg = pg.merge(dba, on=["season", "week", "opp"], how="left")
     pg[["db_out_share", "db_out_n"]] = pg[["db_out_share", "db_out_n"]].fillna(0)

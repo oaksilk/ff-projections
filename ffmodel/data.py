@@ -43,6 +43,9 @@ def load_all(max_age_hours: float = 12) -> dict[str, pd.DataFrame]:
         "snaps": lambda: nfl.load_snap_counts(s),
         "opportunity": lambda: nfl.load_ff_opportunity(s),
         "injuries": lambda: nfl.load_injuries(s),
+        # Weekly roster status: ACT, INA (gameday inactive, 2019+), RES (IR/reserve), ...
+        "rosters": lambda: nfl.load_rosters_weekly(s).select(
+            ["season", "week", "team", "gsis_id", "position", "status"]),
         "players": lambda: nfl.load_players(),
         "ff_ids": lambda: nfl.load_ff_playerids(),
     }
@@ -50,9 +53,13 @@ def load_all(max_age_hours: float = 12) -> dict[str, pd.DataFrame]:
 
 
 def load_ecr(max_age_hours: float = 12) -> pd.DataFrame:
-    """FantasyPros weekly PPR expert consensus rankings (Friday snapshots)."""
+    """FantasyPros weekly expert consensus rankings (Friday snapshots).
+
+    Position pages (weekly-rb/wr/te) plus the overall offense page (weekly-op),
+    which orders RB/WR/TE against each other for flex comparisons.
+    """
     def loader():
         r = nfl.load_ff_rankings("all").to_pandas()
-        r = r[r.page_type.isin(["weekly-wr", "weekly-rb", "weekly-te"])]
+        r = r[r.page_type.isin(["weekly-wr", "weekly-rb", "weekly-te", "weekly-op"])]
         return r[["page_type", "id", "player", "pos", "team", "ecr", "scrape_date"]]
-    return _cached("ecr", loader, max_age_hours)
+    return _cached("ecr_v2", loader, max_age_hours)

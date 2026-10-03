@@ -15,7 +15,8 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 from scipy.stats import spearmanr
 
-from .backtest import TOP_N, _pairwise
+from .backtest import TOP_N
+from .metrics import pairwise as _pairwise
 from .config import ROOT, SCORING, SNAPSHOT_DIR
 from .features import STAT_MAP, score
 

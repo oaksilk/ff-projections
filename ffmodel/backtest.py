@@ -1,21 +1,43 @@
 """Walk-forward backtest against FantasyPros expert consensus (ECR).
 
-For each test season we train only on earlier seasons, predict every week,
-and compare rank accuracy against the Friday ECR snapshot for the same week.
-Only players who were both ranked by ECR and actually played are compared,
-so the model gets no credit for knowing about inactives.
+For each test season we train only on earlier data, predict every week, and
+compare against the Friday ECR snapshot for the same week.
+
+Two information sets (see features.INFO_SETS) are evaluated separately:
+  FRIDAY  injury report and reserve lists only. The fair comparison with the
+          Friday ECR snapshot.
+  SUNDAY  adds gameday inactives. Matches the live 11:45 ET run; it knows more
+          than the Friday experts did, so it is not an equal-information contest.
+
+Only players who were ranked by ECR *and* played are compared (we have no
+prediction rows for players who didn't play). Historical game lines and
+weather have no timestamps, and no historical player props exist, so the
+Vegas prop blend is not backtested; the live scorecard covers it.
 """
+import logging
+
 import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
+from .config import SCORING
 from .data import current_season, load_ecr
+from .features import INFO_SETS, build_features
+from .metrics import (bootstrap_diff, calibration_table, decision_metrics, h2h_prob, pairwise,
+                      pairwise_strict, pinball, rank_blend)
 from .model import QUANTILES, Distribution, Projector, add_distribution, oos_frame
 
+log = logging.getLogger(__name__)
 TOP_N = {"WR": 48, "RB": 36, "TE": 18}
+SOURCES = ("model", "ecr", "naive", "blend")
+SOURCE_NAMES = {"model": "Model", "ecr": "Experts (ECR)", "naive": "Recent average",
+                "blend": "Model+ECR blend"}
+WARMUP_SEASONS = 2  # extra earlier seasons predicted only to train the range model
 
 
 def ecr_by_week(d) -> pd.DataFrame:
+    """Weekly ECR keyed by (player_id, season, week): `ecr` from the position
+    pages and `ecr_flex` from the overall offense page."""
     ecr = load_ecr().copy()
     ecr["scrape_date"] = pd.to_datetime(ecr.scrape_date)
     ids = d["ff_ids"][["fantasypros_id", "gsis_id"]].dropna()
@@ -26,32 +48,21 @@ def ecr_by_week(d) -> pd.DataFrame:
     s = d["schedules"]
     s = s[s.game_type == "REG"].copy()
     s["gameday"] = pd.to_datetime(s.gameday)
-    sundays = s.groupby(["season", "week"]).gameday.max().reset_index()  # week's last game
-    sundays = sundays.sort_values("gameday")
+    ends = s.groupby(["season", "week"]).gameday.max().reset_index()  # week's last game
+    ends = ends.sort_values("gameday")
     ecr = ecr.sort_values("scrape_date")
-    ecr = pd.merge_asof(ecr, sundays.rename(columns={"gameday": "week_end"}),
+    ecr = pd.merge_asof(ecr, ends.rename(columns={"gameday": "week_end"}),
                         left_on="scrape_date", right_on="week_end", direction="forward")
     ecr = ecr.rename(columns={"gsis_id": "player_id"})
-    return ecr[["player_id", "season", "week", "pos", "ecr"]].drop_duplicates(["player_id", "season", "week"])
+    key = ["player_id", "season", "week"]
+    pos = ecr[ecr.page_type != "weekly-op"].drop_duplicates(key, keep="last")[key + ["ecr"]]
+    flex = ecr[(ecr.page_type == "weekly-op") & ecr.pos.isin(TOP_N)].drop_duplicates(key, keep="last")
+    return pos.merge(flex[key + ["ecr"]].rename(columns={"ecr": "ecr_flex"}), on=key, how="outer")
 
 
-def _pairwise(score, actual):
-    """Share of player pairs where `score` orders them the same as `actual`."""
-    s, a = np.asarray(score), np.asarray(actual)
-    i, j = np.triu_indices(len(s), 1)
-    keep = a[i] != a[j]
-    return np.mean(np.sign(s[i] - s[j])[keep] == np.sign(a[i] - a[j])[keep])
-
-
-def run(df, d, seasons=None, retrain_every=6):
-    """Walk-forward: retrain every few weeks on everything before that week.
-
-    Defaults to the four most recent completed seasons (2022–2025 during 2026).
-    """
-    if seasons is None:
-        last = current_season() - 1
-        seasons = tuple(range(last - 3, last + 1))
-    ecr = ecr_by_week(d)
+def predict_walk_forward(df, seasons, retrain_every=6):
+    """Point predictions for every week of `seasons`, each from a model trained
+    only on games before that week (retraining every `retrain_every` weeks)."""
     hist = df[~df.live]
     preds, oos = [], []
     for season in seasons:
@@ -60,67 +71,248 @@ def run(df, d, seasons=None, retrain_every=6):
             test = hist[(hist.season == season) & hist.week.between(start, start + retrain_every - 1)]
             if test.empty:
                 continue
+            log.info("  %s weeks %d-%d: train %d rows", season, start, start + retrain_every - 1, len(train))
             p = Projector().fit(train).predict(test)
-            p["actual_ppr"] = test.fp_ppr.to_numpy()
-            p["actual_half"] = test.fp_half.to_numpy()
-            p["naive"] = test.r_fp_ppr.to_numpy()  # recent-form baseline
+            for fmt in SCORING:
+                p[f"actual_{fmt}"] = test[f"fp_{fmt}"].to_numpy()
+            # Recent-form baseline. EWMA is linear, so std = 2*half - ppr exactly.
+            p["naive_ppr"] = test.r_fp_ppr.to_numpy()
+            p["naive_half"] = test.r_fp_half.to_numpy()
+            p["naive_std"] = 2 * p.naive_half - p.naive_ppr
             preds.append(p)
             oos.append(oos_frame(p, test))
-    p, oos = pd.concat(preds), pd.concat(oos, ignore_index=True)
+    return pd.concat(preds), pd.concat(oos, ignore_index=True)
 
-    # Distribution calibration: fit on the other seasons, apply to this one.
-    # Prediction rows keep the feature table's index, so we can look features up.
+
+def run_info(d, info, seasons, retrain_every=6, warmup=WARMUP_SEASONS):
+    """Backtest one information set. Returns (predictions, out-of-sample frame)."""
+    log.info("building features (%s information)", info)
+    df = build_features(d, info=info)
+    hist = df[~df.live]
+    all_seasons = tuple(range(seasons[0] - warmup, seasons[0])) + tuple(seasons)
+    p, oos = predict_walk_forward(df, all_seasons, retrain_every)
+
+    # Ranges, chronologically: each season's range model learns only from
+    # out-of-sample errors in earlier seasons (warm-up seasons supply 2022's).
     parts = []
     for season in seasons:
-        dist = Distribution().fit(oos[oos.season != season])
+        dist = Distribution().fit(oos[oos.season < season])
         sub = p[p.season == season].copy()
         parts.append(add_distribution(sub, hist.loc[sub.index], dist))
     p = pd.concat(parts)
-    p = p.merge(ecr, on=["player_id", "season", "week"], how="left")
+    p["info"] = info
+    return p, oos
 
+
+def run(d, seasons=None, info_sets=INFO_SETS, retrain_every=6):
+    """Defaults to the four most recent completed seasons (2022–2025 during 2026)."""
+    if seasons is None:
+        last = current_season() - 1
+        seasons = tuple(range(last - 3, last + 1))
+    ecr = ecr_by_week(d)
+    preds, oos_by = [], {}
+    for info in info_sets:
+        p, oos = run_info(d, info, seasons, retrain_every)
+        preds.append(p.merge(ecr, on=["player_id", "season", "week"], how="left"))
+        oos_by[info] = oos
+    p = pd.concat(preds, ignore_index=True)
+    return p, score_groups(p), oos_by
+
+
+# ---------------------------------------------------------------- scoring
+
+def _universe(g):
+    """Experts' top N at each position among players who played and were ranked."""
+    return pd.concat([g[g.position == pos].nsmallest(n, "ecr") for pos, n in TOP_N.items()])
+
+
+def score_groups(p):
+    """One row per (info, season, week, group, format): decision metrics for each source.
+
+    group is RB/WR/TE (same-position pairs) or FLEX (cross-position pairs only,
+    ordered for ECR by the overall offense page).
+    """
     rows = []
-    for (season, week, pos), g in p[p.ecr.notna()].groupby(["season", "week", "position"]):
-        g = g.nsmallest(TOP_N[pos], "ecr")
-        if len(g) < 8:
+    for (info, season, week), wk in p[p.ecr.notna()].groupby(["info", "season", "week"]):
+        u = _universe(wk)
+        groups = [(pos, u[u.position == pos]) for pos in TOP_N]
+        fx = u[u.ecr_flex.notna()]
+        groups.append(("FLEX", fx))
+        for grp, g in groups:
+            if len(g) < 8:
+                continue
+            flex = grp == "FLEX"
+            ecr_score = -(g.ecr_flex if flex else g.ecr).to_numpy()
+            ecr_rank = pd.Series(-ecr_score).rank(method="first").to_numpy()
+            for fmt in SCORING:
+                actual = g[f"actual_{fmt}"].to_numpy()
+                model = g[f"{fmt}_proj"].to_numpy()
+                scores = {"model": model, "ecr": ecr_score,
+                          "naive": g[f"naive_{fmt}"].fillna(0).to_numpy(),
+                          "blend": rank_blend(model, ecr_score)}
+                m = decision_metrics(scores, actual, ecr_rank,
+                                     cross=g.position.to_numpy() if flex else None)
+                row = {"info": info, "season": season, "week": week, "group": grp, "fmt": fmt,
+                       "n": len(g), **m}
+                if not flex:
+                    row["model_strict"] = pairwise_strict(model, actual)
+                    row["ecr_strict"] = pairwise_strict(ecr_score, actual)
+                    row["model_rho"] = spearmanr(model, actual)[0]
+                    row["ecr_rho"] = spearmanr(ecr_score, actual)[0]
+                rows.append(row)
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------- report
+
+def _pct(x):
+    return "   –  " if pd.isna(x) else f"{100 * x:5.1f}%"
+
+
+def _ci(rows, a, b, scale=100, unit="pts"):
+    mean, lo, hi = bootstrap_diff(rows, a, b)
+    if pd.isna(mean):
+        return "–"
+    return f"{scale * mean:+.2f} [{scale * lo:+.2f}, {scale * hi:+.2f}]"
+
+
+def _decision_table(w, metric, lower_better=False):
+    """Rows RB/WR/TE/ALL/FLEX; columns per source plus differences vs ECR with 95% CIs."""
+    pct = metric in ("pair", "close")
+    fmtv = _pct if pct else (lambda x: "   –  " if pd.isna(x) else f"{x:6.2f}")
+    scale = 100 if pct else 1
+    head = f"{'':6}" + "".join(f"{SOURCE_NAMES[s]:>17}" for s in SOURCES) + \
+           f"{'Model − ECR [95% CI]':>28}{'Blend − ECR [95% CI]':>28}"
+    lines = [head]
+    for grp in [*TOP_N, "ALL", "FLEX"]:
+        r = w[w.group.isin(TOP_N)] if grp == "ALL" else w[w.group == grp]
+        if r.empty:
             continue
-        rows.append({
-            "season": season, "week": week, "position": pos, "n": len(g),
-            "model_rho": spearmanr(g.ppr_proj, g.actual_ppr)[0],
-            "ecr_rho": spearmanr(-g.ecr, g.actual_ppr)[0],
-            "naive_rho": spearmanr(g.naive.fillna(0), g.actual_ppr)[0],
-            "model_pair": _pairwise(g.ppr_proj, g.actual_ppr),
-            "ecr_pair": _pairwise(-g.ecr, g.actual_ppr),
-            "blend_pair": _pairwise(_blend_rank(g), g.actual_ppr),
-        })
-    return p, pd.DataFrame(rows), oos
+        cells = "".join(f"{fmtv(r[f'{s}_{metric}'].mean()):>17}" for s in SOURCES)
+        lines.append(f"{grp:6}{cells}{_ci(r, f'model_{metric}', f'ecr_{metric}', scale):>28}"
+                     f"{_ci(r, f'blend_{metric}', f'ecr_{metric}', scale):>28}")
+    note = "(lower is better)" if lower_better else ""
+    return "\n".join(lines) + (f"\n{note}" if note else "")
 
 
-def _blend_rank(g):
-    """50/50 average of model rank and ECR rank (higher = better)."""
-    return -(g.ppr_proj.rank(ascending=False) + g.ecr.rank()) / 2
+def verdict(rows, a="model_pair", b="ecr_pair"):
+    """Plain-English reading of a difference and its 95% interval."""
+    mean, lo, hi = bootstrap_diff(rows, a, b)
+    if lo > 0:
+        return f"ahead of the experts ({100 * mean:+.2f} pts; the 95% interval excludes zero)"
+    if hi < 0:
+        return f"behind the experts ({100 * mean:+.2f} pts; the 95% interval excludes zero)"
+    return f"statistically tied with the experts ({100 * mean:+.2f} pts, 95% interval {100 * lo:+.2f} to {100 * hi:+.2f})"
+
+
+def _distribution_section(p, fmt):
+    lines = []
+    for label, sub in (("all player-games", p), (f"projected 8+ {fmt.upper()} pts", p[p[f"{fmt}_proj"] >= 8])):
+        cov = " ".join(f"q{int(q * 100)} {np.mean(sub[f'actual_{fmt}'] < sub[f'{fmt}_q{int(q * 100)}']):.3f}"
+                       for q in QUANTILES)
+        pin = np.mean([pinball(sub[f"actual_{fmt}"], sub[f"{fmt}_q{int(q * 100)}"], q) for q in QUANTILES])
+        inside = sub[f"actual_{fmt}"].between(sub[f"{fmt}_q10"], sub[f"{fmt}_q90"]).mean()
+        width = (sub[f"{fmt}_q90"] - sub[f"{fmt}_q10"]).mean()
+        lines.append(f"  {label} (n={len(sub)}): share below {cov}")
+        lines.append(f"    10–90% range holds {inside:.1%} (target 80%), average width {width:.1f} pts, "
+                     f"mean pinball loss {pin:.3f}")
+    return lines
+
+
+def _h2h_section(p, fmt="ppr", max_pairs=60000):
+    """Calibration of head-to-head probabilities for same-position pairs in the experts' top N."""
+    rng = np.random.default_rng(0)
+    qa, qb, wins = [], [], []
+    qcols = [f"{fmt}_q{int(q * 100)}" for q in QUANTILES]
+    for _, wk in p[p.ecr.notna()].groupby(["season", "week"]):
+        u = _universe(wk)
+        for pos in TOP_N:
+            g = u[u.position == pos]
+            i, j = np.triu_indices(len(g), 1)
+            a = g[f"actual_{fmt}"].to_numpy()
+            keep = a[i] != a[j]
+            q = g[qcols].to_numpy()
+            qa.append(q[i[keep]]), qb.append(q[j[keep]]), wins.append(a[i[keep]] > a[j[keep]])
+    qa, qb, wins = np.concatenate(qa), np.concatenate(qb), np.concatenate(wins)
+    if len(wins) > max_pairs:
+        k = rng.choice(len(wins), max_pairs, replace=False)
+        qa, qb, wins = qa[k], qb[k], wins[k]
+    prob = np.concatenate([h2h_prob(qa[s:s + 5000], qb[s:s + 5000]) for s in range(0, len(qa), 5000)])
+    # Orient every pair so the stated probability is for the favorite.
+    fav = prob >= 0.5
+    pf, hit = np.where(fav, prob, 1 - prob), np.where(fav, wins, ~wins)
+    cal = calibration_table(pf, hit.astype(float), [0.5, 0.55, 0.6, 0.65, 0.7, 0.8, 0.9, 1.0])
+    brier = np.mean((pf - hit) ** 2)
+    return [f"  {len(pf)} pairs, Brier score {brier:.4f} (lower is better; always saying 50% scores 0.25)",
+            "  favorite's stated chance vs. how often the favorite actually scored more:",
+            *("    " + ln for ln in cal.round(3).to_string().splitlines())]
 
 
 def summarize(p, weekly):
-    lines = []
-    s = weekly.groupby("position")[["model_rho", "ecr_rho", "naive_rho", "model_pair", "ecr_pair", "blend_pair"]].mean()
-    s.loc["ALL"] = weekly[s.columns].mean()
-    wins = weekly.assign(win=weekly.model_pair > weekly.ecr_pair).groupby("position").win.mean()
-    s["model_beats_ecr_weeks"] = wins
-    s.loc["ALL", "model_beats_ecr_weeks"] = (weekly.model_pair > weekly.ecr_pair).mean()
-    lines.append("Rank accuracy vs actual PPR points (top-N by ECR, players who played)")
-    lines.append(s.round(3).to_string())
-    by_season = weekly.groupby("season")[["model_pair", "ecr_pair"]].mean().round(3)
-    lines.append("\nPairwise accuracy by season\n" + by_season.to_string())
+    lines = [
+        "BACKTEST: walk-forward, 2022–2025 regular seasons, vs. FantasyPros expert consensus (ECR)",
+        "",
+        "How to read this",
+        "- Pairwise accuracy: for two players, how often the forecast put the higher scorer first.",
+        "  Tied forecasts get half credit. Compared on the experts' top 48 WR / 36 RB / 18 TE",
+        "  who played. ALL weights each position-week equally. FLEX uses cross-position pairs only.",
+        "- Close decisions: pairs within 5 expert ranking places of each other.",
+        "- Points lost: average points left on the bench per decision (wrong pick = the gap).",
+        "- Model+ECR blend: equal-weight average of model rank and expert rank, fixed in advance.",
+        "- [95% CI]: resampling whole weeks. If the interval includes 0, the difference is not",
+        "  distinguishable from chance.",
+        "- FRIDAY uses the injury report only (fair vs. Friday ECR). SUNDAY adds gameday inactives",
+        "  (matches the live 11:45 ET run, so it knows more than the Friday experts did).",
+        "- Not tested here: the Vegas prop blend (no historical props), and the timing of",
+        "  historical game lines and weather (no timestamps). The live scorecard covers the blend.",
+    ]
+    for info in INFO_SETS:
+        w = weekly[weekly["info"] == info]
+        if w.empty:
+            continue
+        sub = p[p["info"] == info]
+        ppr = w[w.fmt == "ppr"]
+        lines += ["", "=" * 100, f"{info.upper()} information", "=" * 100, "",
+                  "Headline (PPR, all positions): model is " + verdict(ppr[ppr.group.isin(TOP_N)]) + ".",
+                  "Model+ECR blend is " + verdict(ppr[ppr.group.isin(TOP_N)], "blend_pair") + ".",
+                  "", "Pairwise accuracy, PPR", _decision_table(ppr, "pair"),
+                  "", "Close decisions (within 5 expert places), PPR", _decision_table(ppr, "close"),
+                  "", "Points lost per decision, all pairs, PPR", _decision_table(ppr, "lost", True),
+                  "", "Points lost per close decision, PPR", _decision_table(ppr, "close_lost", True),
+                  "", "By scoring format (ALL positions): pairwise accuracy"]
+        for fmt in SCORING:
+            r = w[(w.fmt == fmt) & w.group.isin(TOP_N)]
+            lines.append(f"  {fmt.upper():5} model {_pct(r.model_pair.mean())}  experts {_pct(r.ecr_pair.mean())}  "
+                         f"recent avg {_pct(r.naive_pair.mean())}  blend {_pct(r.blend_pair.mean())}  "
+                         f"model − experts {_ci(r, 'model_pair', 'ecr_pair')}")
+        r = ppr[ppr.group.isin(TOP_N)]
+        lines += ["", "By season (PPR, ALL positions): model vs experts"]
+        for season, s in r.groupby("season"):
+            lines.append(f"  {season}  model {_pct(s.model_pair.mean())}  experts {_pct(s.ecr_pair.mean())}  "
+                         f"model wins {(s.groupby('week').model_pair.mean() > s.groupby('week').ecr_pair.mean()).mean():.0%} of weeks")
+        lines += ["", "Old convention (tied forecasts count as wrong), PPR ALL, for comparison with earlier reports:",
+                  f"  model {_pct(r.model_strict.mean())}  experts {_pct(r.ecr_strict.mean())}  "
+                  f"(rank correlation: model {r.model_rho.mean():.3f}, experts {r.ecr_rho.mean():.3f})"]
 
-    lines.append("\nCalibration (all player-games, PPR):")
-    for q in (10, 25, 50, 75, 90):
-        lines.append(f"  actual below q{q}: {np.mean(p.actual_ppr < p[f'ppr_q{q}']):.3f}")
-    for fmt in ("half", "ppr"):
-        mae = np.mean(np.abs(p[f"{fmt}_proj"] - p[f"actual_{fmt}"]))
-        bias = np.mean(p[f"{fmt}_proj"] - p[f"actual_{fmt}"])
-        lines.append(f"  {fmt} MAE {mae:.2f}  bias {bias:+.2f}")
-    bins = pd.cut(p.ppr_boom, [0, .05, .1, .2, .3, .5, 1])
-    cal = p.groupby(bins, observed=True).apply(lambda g: pd.Series({
-        "n": len(g), "pred": g.ppr_boom.mean(), "actual": (g.actual_ppr > 20).mean()}))
-    lines.append("\nBoom (20+ PPR) calibration\n" + cal.round(3).to_string())
+        lines += ["", "Point accuracy (mean absolute error, all player-games; recent average shown for reference)"]
+        for fmt in SCORING:
+            for label, s in (("all", sub), ("proj 8+", sub[sub[f"{fmt}_proj"] >= 8])):
+                mae = np.mean(np.abs(s[f"{fmt}_proj"] - s[f"actual_{fmt}"]))
+                bias = np.mean(s[f"{fmt}_proj"] - s[f"actual_{fmt}"])
+                nmae = np.mean(np.abs(s[f"naive_{fmt}"].fillna(0) - s[f"actual_{fmt}"]))
+                lines.append(f"  {fmt.upper():5} {label:8} MAE {mae:5.2f}  bias {bias:+.2f}   recent avg MAE {nmae:5.2f}")
+
+        lines += ["", "Ranges (chronological: each season's range model trained only on earlier seasons)"]
+        for fmt in SCORING:
+            lines.append(f" {fmt.upper()}")
+            lines += _distribution_section(sub, fmt)
+
+        lines += ["", "Boom % calibration (P of more than 20 points)"]
+        for fmt in SCORING:
+            cal = calibration_table(sub[f"{fmt}_boom"], (sub[f"actual_{fmt}"] > 20).astype(float),
+                                    [0, .05, .1, .2, .3, .5, 1])
+            lines += [f" {fmt.upper()}", *("   " + ln for ln in cal.round(3).to_string().splitlines())]
+
+        lines += ["", "Head-to-head probability calibration (PPR, same page method, independence assumed)"]
+        lines += _h2h_section(sub)
     return "\n".join(lines)
