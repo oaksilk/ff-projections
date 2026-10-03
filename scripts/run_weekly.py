@@ -1,11 +1,16 @@
 """Build this week's rankings and write site/data/rankings.json.
 
-Usage: python scripts/run_weekly.py [--props] [--snapshot LABEL]
+Usage: python scripts/run_weekly.py [--props] [--snapshot LABEL] [--info friday|sunday]
   --props            fetch Vegas player props (spends ~4 Odds API credits per game)
   --snapshot LABEL   also save a frozen snapshot (fri/sun) for weekly evaluation
+  --info SET         pregame information set to train on (default: by ET time, config.info_set)
+
+Every run also writes an immutable forecast archive (archive.py) and refreshes
+the prospective scorecard for finished weeks (scorecard.py).
 """
 import argparse
 import datetime as dt
+import json
 import logging
 import os
 import sys
@@ -16,8 +21,8 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from ffmodel import live as lv, publish, snapshot
-from ffmodel.config import ROOT, SCHEDULE_ET
+from ffmodel import archive, live as lv, publish, scorecard, snapshot
+from ffmodel.config import PROPS_DIR, ROOT, SCHEDULE_ET, info_set
 from ffmodel.data import load_all
 from ffmodel.features import build_features
 from ffmodel.model import Distribution, Projector, add_distribution
@@ -49,6 +54,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--props", action="store_true")
     ap.add_argument("--snapshot", choices=["fri", "sun"])
+    ap.add_argument("--info", choices=["friday", "sunday"])
     args = ap.parse_args()
     load_env()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -66,27 +72,29 @@ def main():
     players["name"] = players.player_id.map(pl.display_name)
     players["headshot"] = players.player_id.map(pl.headshot)
     wx = lv.weather(games)
-    log.info("%d skill players expected active; %d DBs ruled out; %d weather forecasts",
-             len(players), len(db_out), len(wx))
+    n_outdoor = len(lv.outdoor_games(games))
+    info = args.info or info_set(dt.datetime.now(ZoneInfo("America/New_York")))
+    log.info("%d skill players expected active; %d DBs ruled out; %d of %d weather forecasts; %s information",
+             len(players), len(db_out), len(wx), n_outdoor, info)
 
     df = build_features(d, live_players=players[["player_id", "team", "season", "week", "position",
                                                  "inj_report", "inj_practice"]],
-                        live_def_out=db_out, weather_override=wx)
+                        live_def_out=db_out, weather_override=wx, info=info)
     hist = df[~df.live]
     live = df[df.live & (df.season == season) & (df.week == week)]
 
     model = Projector().fit(df)
     pred = model.predict(live)
-    pred["model_half"] = pred.half_proj
+    dist = Distribution().fit(pd.read_parquet(ROOT / "model_data" / "oos.parquet"))
+    model_pred = add_distribution(pred.copy(), live, dist)  # model-only, archived separately
     props_at, raw = lv.fetch_props(season, week, games, allow_fetch=args.props)
     pred = publish.blend_market(pred, players, raw)
-    dist = Distribution().fit(pd.read_parquet(ROOT / "model_data" / "oos.parquet"))
     pred = add_distribution(pred, live, dist)
     log.info("%d players matched to Vegas props", int(pred.market.sum()))
 
     reasons = publish.explain(model, live, hist)
     weather = {r.game_id: {"temp": round(r.temp), "wind": round(r.wind), "precip": round(r.precip, 2)}
-               for r in wx.itertuples()}
+               for r in wx.itertuples() if pd.notna(r.temp) and pd.notna(r.wind)}
     ctx = publish.context(live, hist, d["players"].set_index("gsis_id").display_name)
     ps = d["player_stats"]
     played = ps[(ps.season == season) & (ps.season_type == "REG")].game_id.unique()
@@ -96,7 +104,8 @@ def main():
         "next": next_run(),
         "injuries": players.attrs.get("injuries_at"),
         "weather": dt.datetime.now(dt.timezone.utc).isoformat(timespec="minutes") if len(wx) else None,
-        "outdoor_games": len(wx),
+        "outdoor_games": len(weather),
+        "outdoor_expected": n_outdoor,
         "lines": lv.lines_updated_at(),
         "props": props_at.isoformat() if props_at is not None and len(raw) else None,
         "props_games": len(raw),
@@ -107,12 +116,30 @@ def main():
         "games_through": sched[(sched.season == season) & (sched.game_type == "REG")
                                & sched.result.notna()].gameday.max(),
     }
+    h2h = json.loads((ROOT / "model_data" / "h2h_calibration.json").read_text())
     payload = publish.to_json(pred, reasons, players, games, season, week,
-                              {"weather": weather, "props_games": len(raw), "freshness": freshness}, ctx)
-    publish.write(payload, season, week)
+                              {"weather": weather, "props_games": len(raw), "freshness": freshness,
+                               "info_set": info, "h2h_slope": h2h["slope"]}, ctx)
+    publish.write(payload)
     log.info("wrote %d players", len(payload["players"]))
+
+    run_meta = {
+        "git_sha": snapshot._git_sha(), "event": os.environ.get("GITHUB_EVENT_NAME", "local"),
+        "slot": os.environ.get("SLOT") or None, "info_set": info,
+        "market_weight": publish.MARKET_WEIGHT, "h2h_slope": h2h["slope"],
+        "availability": {"expected_active": len(players), "ruled_out": players.attrs.get("ruled_out", []),
+                         "db_out_pfr": sorted(db_out)},
+        "market": {"props_games": len(raw), "players_with_props": int(pred.market.sum()),
+                   "players": len(pred), "props": archive.props_reference(PROPS_DIR / f"{season}_w{week:02d}.json")},
+        "weather": {"forecasts": len(weather), "outdoor_games": n_outdoor},
+    }
+    archive.save(pred, model_pred, live, payload, run_meta, d["ff_ids"])
     if args.snapshot:
         snapshot.save(payload, args.snapshot, d["ff_ids"])
+    try:
+        scorecard.update(d)
+    except Exception as e:  # grading must never block publishing rankings
+        log.warning("scorecard update failed: %s", e)
 
 
 if __name__ == "__main__":

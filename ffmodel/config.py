@@ -39,17 +39,38 @@ OUTDOOR_STADIUMS = {
 OUT_STATUSES = {"Out", "IR", "PUP", "Sus", "NFI", "Doubtful", "COV", "DNR"}
 
 # Scheduled runs, in US Eastern time: (weekday Mon=0..Sun=6, hour, minute, fetch_props).
-# GitHub cron is UTC-only, so .github/workflows/weekly.yml lists each slot at both
-# its daylight (UTC-4) and standard (UTC-5) offset, and scripts/gate.py lets only
-# the one landing within GATE_MINUTES after a slot proceed. This list also drives
-# the page's "next update" time. Keep the workflow crons in sync with it.
+# GitHub cron is UTC-only and often fires late (hours, at busy times), so the workflow
+# fires a cheap gate check twice an hour at unpopular minutes (CHECK_MINUTES) and
+# scripts/gate.py runs a build whenever a slot has passed and hasn't been served yet
+# (catch-up, up to MAX_LATE_HOURS late). Served slots are recorded in RUN_STATE.
+# This list also drives the page's "next update" time.
 SCHEDULE_ET = [
     (1, 10, 0, False),   # Tue 10:00  last week's stats are final
     (6, 9, 0, False),    # Sun 9:00   morning injury news
-    (6, 11, 45, True),   # Sun 11:45  just after 1pm inactives; Vegas props
+    (6, 11, 15, True),   # Sun 11:15  first props attempt (backup for 11:45)
+    (6, 11, 45, True),   # Sun 11:45  just after 1pm inactives; props (reused if 11:15 got them)
     (6, 15, 0, False),   # Sun 3:00   after late-afternoon inactives
 ] + [(d, 19, 5, False) for d in range(7)]  # nightly 7:05: injuries; TNF/SNF/MNF inactives
-GATE_MINUTES = 50
+CHECK_MINUTES = (17, 47)   # cron minutes past each hour (top of the hour is GitHub's busiest)
+MAX_LATE_HOURS = 6         # a slot this late is skipped (the next slot covers it)
+RUN_STATE = ROOT / "data" / "run_state.json"  # committed: last served slot, last build, injury hash
+
+# Hourly injury check: between these ET hours, if ESPN's injury statuses for relevant
+# positions changed since the last build, rebuild (no props). At most once per gap.
+INJURY_CHECK_HOURS_ET = (8, 23)
+INJURY_CHECK_POSITIONS = {"QB", "RB", "WR", "TE", "FB", "CB", "S", "FS", "SS", "DB"}
+INJURY_REBUILD_GAP_MIN = 55
+ESPN_INJURIES = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/injuries"
+
+# Which pregame information the model trains on (features.INFO_SETS): "sunday" once the
+# 1pm gameday inactives are out (Sunday from 11:30 ET), "friday" (injury report only) otherwise.
+SUNDAY_INFO_FROM = (6, 11, 30)
+
+
+def info_set(now_et):
+    wd, h, m = SUNDAY_INFO_FROM
+    return "sunday" if now_et.weekday() == wd and (now_et.hour, now_et.minute) >= (h, m) else "friday"
+
 
 # Slots whose run also saves a frozen snapshot for weekly evaluation (see docs/OPERATIONS.md):
 # Friday after the final injury report, Sunday just before the 1pm kickoffs.

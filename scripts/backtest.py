@@ -4,6 +4,7 @@ Usage: python scripts/backtest.py [--info friday|sunday] [--seasons 2022-2025] [
 Both information sets by default (~80–90 min on a laptop).
 """
 import argparse
+import json
 import logging
 import sys
 from pathlib import Path
@@ -38,6 +39,11 @@ weekly.to_parquet(cache / "backtest_weekly.parquet", index=False)
 if "sunday" in oos and args.out == str(ROOT / "reports" / "backtest.txt"):
     (ROOT / "model_data").mkdir(exist_ok=True)
     oos["sunday"].to_parquet(ROOT / "model_data" / "oos.parquet", index=False)
+    # Head-to-head odds correction shown on the page (see backtest.fit_h2h_slope).
+    sun = p[p["info"] == "sunday"]
+    (ROOT / "model_data" / "h2h_calibration.json").write_text(json.dumps(
+        {"slope": round(backtest.fit_h2h_slope(sun), 4), "fit_on": "sunday backtest, PPR, same-position top-N pairs",
+         "seasons": sorted(int(x) for x in sun.season.unique())}, indent=1) + "\n")
 text = backtest.summarize(p, weekly)
 print(text)
 Path(args.out).parent.mkdir(exist_ok=True)

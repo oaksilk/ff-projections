@@ -35,12 +35,13 @@ jobs:
           done
 
   # Retrain the range/boom calibration and re-score the backtest on the most recent four
-  # seasons (~20-40 min). Commits the results and emails a summary so the owner can see
+  # seasons, both information sets plus two warm-up seasons (~1.5 h on a laptop, likely
+  # 2-4 h on a GitHub runner). Commits the results and emails a summary so the owner can see
   # whether the refreshed model held up.
   refresh:
     if: github.event.schedule == '0 14 1 8 *' || inputs.task == 'refresh'
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -56,14 +57,15 @@ jobs:
         run: |
           git config user.name "rankings-bot"
           git config user.email "rankings-bot@users.noreply.github.com"
-          git add model_data/oos.parquet reports/backtest.txt
+          git add model_data/oos.parquet model_data/h2h_calibration.json reports/backtest.txt
           git diff --cached --quiet || git commit -m "Annual backtest refresh"
           git pull --rebase
           git push
           {
             echo "The yearly refresh re-ran the backtest on the last four completed seasons."
-            echo "Compare the ALL row: model_pair is our start/sit accuracy, ecr_pair is the experts'."
-            echo "If ours dropped noticeably or fell below the experts, ask Claude to look into it before the season."
+            echo "Read the 'Headline' lines under FRIDAY information: they say whether the model is ahead of,"
+            echo "tied with, or behind the experts, with a 95% range. If it slipped from tied to behind, or the"
+            echo "ranges or head-to-head calibration got worse, ask Claude to look into it before the season."
             echo; echo "### After"; echo '```'; cat reports/backtest.txt; echo '```'
             echo; echo "### Before"; echo '```'; cat /tmp/backtest_before.txt; echo '```'
           } > /tmp/body.md

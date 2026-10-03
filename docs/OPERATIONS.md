@@ -4,10 +4,11 @@ How the system runs week to week and year to year, and what to do when something
 breaks. Everything here is automatic; the owner's only job is reading the weekly
 email. The *why* behind these choices is in `DESIGN.md` (§4 and the decision log).
 
-Exact run times live in one place: `SCHEDULE_ET` (plus `SNAPSHOT_SLOTS` and the
-season-window settings) in `ffmodel/config.py`. The crons in
-`.github/workflows/weekly.yml` mirror it. If you change one, change the other, then
-update the README schedule table and this file.
+Exact run times live in one place: `SCHEDULE_ET` (plus `SNAPSHOT_SLOTS`, the
+catch-up and injury-check settings, and the season-window settings) in
+`ffmodel/config.py`. The workflow crons don't encode slot times any more (see
+"How runs are triggered"), so changing a slot only means editing `SCHEDULE_ET`,
+then the README schedule table and this file.
 
 ## In-season week
 
@@ -16,12 +17,65 @@ update the README schedule table and this file.
 | Nightly 7:05 PM | Injury news; Thu/Sun/Mon-night inactives | Updated rankings on the site |
 | **Fri 7:05 PM** | Same, after the final injury report | **Friday snapshot** `snapshots/<season>/wNN/fri.json` |
 | Sun 9:00 AM | Morning injury news | Updated rankings |
-| **Sun 11:45 AM** | 1pm inactives, weather, **Vegas props** (only props pull) | **Sunday snapshot** `.../sun.json` |
+| **Sun 11:15 AM** | First **Vegas props** attempt | Updated rankings with props |
+| **Sun 11:45 AM** | 1pm inactives, weather, props retry (reuses 11:15's pull) | **Sunday snapshot** `.../sun.json` |
 | Sun 3:00 PM | Late-afternoon inactives | Updated rankings |
-| **Tue 10:00 AM** | Last week's stats final | Rankings for the new week; **evaluation report emailed** |
+| **Tue 10:00 AM** | Last week's stats final | Rankings for the new week; scorecard graded; **evaluation report emailed** |
+| Hourly, 8 AM–11 PM | Only if injury statuses changed since the last build | Updated rankings (no props) |
 
-Every run is the `build` job of `weekly.yml` (rankings → commit → deploy to Pages),
-followed by the `evaluate` job.
+Every build is the `build` job of `weekly.yml` (rankings → archive → scorecard →
+commit → deploy to Pages), followed by the `evaluate` job.
+
+### How runs are triggered
+
+GitHub's cron often fires late (we saw 2h46m and 4h41m on 2026-10-02) and sometimes
+not at all, worst at the top of the hour. So:
+
+- `weekly.yml` fires a cheap **gate check** at :17 and :47 past every hour (`CHECK_MINUTES`).
+- `scripts/gate.py` builds when **a slot in `SCHEDULE_ET` has passed and hasn't been
+  served yet**, up to `MAX_LATE_HOURS` (6) late. Several missed slots are served by one
+  build (props if any of them pulls props, the latest snapshot label).
+- Between slots, from 8 AM to 11 PM ET, it fetches ESPN's injury list (~360 KB) and
+  builds if statuses for QB/RB/WR/TE/DBs changed since the last build (at most once per
+  55 min, never pulls props).
+- After a build succeeds, `gate.py --record` writes `data/run_state.json` (last served
+  slot, last build time, injury fingerprint), committed with the rankings. A failed
+  build doesn't record, so the next check (≤30 min) retries it.
+- Off-season, the gate exits immediately.
+
+**Odds API budget:** props are pulled by the Sun 11:15 slot; 11:45 and any catch-up run
+reuse a pull from the last 8 hours (`PROPS_REUSE_HOURS`), so it's still one pull
+(~60 credits) per Sunday.
+
+### Forecast archive
+
+- Every build writes `site/data/history/<season>_wNN/<UTC time>.json` (created with
+  exclusive mode, never overwritten): model-only and published (Vegas-adjusted)
+  projections, ranges and boom for all three formats, the recent-average baseline, the
+  information set, git commit, slot/trigger, scoring rules, who was ruled out, prop
+  coverage, a hash of the raw props file, and input freshness.
+- The same build writes `data/archive/<season>_wNN/<same time>.json` with FantasyPros
+  ECR (nflverse), Sleeper (Rotowire) and ESPN projections. **Repo only, not deployed**:
+  we don't republish other companies' numbers. Sleeper and ESPN are unofficial
+  endpoints; if they fail the file records the error and the run continues.
+- The old single `site/data/history/<season>_wNN.json` (overwritten each run) is no
+  longer written; the one from 2026 Week 4 stays as-is.
+
+### Scorecard
+
+- `ffmodel/scorecard.py` runs at the end of every build and grades any archived week
+  that is final and not yet graded. Output: `site/data/scorecard.json` (accuracy
+  figures only), the page's Scorecard section, and a section in the weekly email.
+- Sources: our published rankings, our model alone, the model + expert blend,
+  FantasyPros experts, Sleeper, ESPN, recent average.
+- Each player is graded on each source's **last archive file before his own
+  kickoff**. The decision pool is every player in any source's top 48 WR / 36 RB /
+  18 TE; recommended players who didn't play count as 0.
+- Metrics: start/sit pairwise accuracy (ties half credit), close calls, points lost,
+  flex, MAE, range coverage, pinball loss, boom and head-to-head calibration; season
+  to date with 95% intervals vs. the experts.
+- **Re-grade a week:** remove its entry from `site/data/scorecard.json` `weeks`; the
+  next build regrades it. Never edit the archive files.
 
 ### Snapshots
 
@@ -85,12 +139,18 @@ Nothing routine. Read the Tuesday email if you like. If GitHub emails about a
 - **Failed run email:** open the run link and read the failing step's log. A
   `build` failure means no new rankings that slot. An `evaluate` failure doesn't
   block rankings; fix it and the next run catches up automatically.
+- **Runs late or skipped:** normal; the gate catches up within 30 minutes of the next
+  check. `gh run list --workflow weekly.yml` shows each check; the build step's commit
+  message and the gate log line say why it ran (`slot Sun 11:45 ET (35 min after)`,
+  `injury statuses changed`) or didn't.
 - **Missed snapshot:** it can't be recreated after kickoff. The report notes the
   gap and scores whichever snapshot exists. To take one manually before kickoff:
   Actions → Weekly rankings → Run workflow → `snapshot: fri|sun`.
 - **Test that emails arrive:** Actions → Maintenance → Run workflow →
   `test-email`. Issues opened by the bot email the owner; issues the owner opens
   themselves do not.
+- **Scorecard or third-party archive failed:** never blocks rankings. A warning in the
+  build log says why; the next build retries grading.
 - **Season didn't start:** check `gh run list --workflow weekly.yml`. If the
   workflow shows as disabled, run Maintenance → `keepalive` or enable it in the
   Actions tab.

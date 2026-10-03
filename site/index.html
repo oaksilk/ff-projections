@@ -141,12 +141,29 @@ details.key p { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
 .legend p { margin: 4px 0; }
 .empty { padding: 40px; text-align: center; color: var(--muted); }
 
+/* Phones: the Range and Why columns collapse into a compact line under the player's name. */
+.mob { display: none; }
 @media (max-width: 760px) {
   .range, .why { display: none; }
   td, th { padding: 8px 6px; }
   .pl img { width: 28px; height: 28px; }
   tr.detail > td { padding-left: 16px; }
+  .mob { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 8px; margin-top: 4px; }
+  .mob svg { width: 80px; height: 14px; flex: none; }
+  .mob .chip { font-size: 10.5px; padding: 1px 6px; }
+  .sub { white-space: normal; }
 }
+.compare .flag { margin-top: 8px; font-size: 12.5px; color: var(--warn); background: var(--warn-soft);
+  border-radius: 8px; padding: 6px 10px; }
+.chip.vg { box-shadow: inset 0 0 0 1px currentColor; }
+.ftab tr.vegas td { border-top: 1px solid var(--border) !important; padding-top: 6px; }
+details.score { margin-top: 18px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 16px; }
+details.score summary { cursor: pointer; font-weight: 600; }
+details.score p { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
+.stab { margin-top: 10px; font-size: 13px; }
+.stab th { padding: 6px 8px; } .stab td { padding: 6px 8px; }
+.stab td.ci { color: var(--muted); font-size: 12px; }
+.scroll { overflow-x: auto; }
 </style>
 </head>
 <body>
@@ -178,15 +195,22 @@ details.key p { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
   <div class="legend">
     <p><b>Proj</b> is the average outcome. The <b>range bar</b> shows the 10th–90th percentile, with the darker box covering the middle half and a tick at the median.
       <b>Boom</b> is the chance of 20+ points.</p>
-    <p><b>Why</b> shows how many points each factor adds or subtracts compared with a neutral baseline. Click a player for details, then pick a second player to see who is more likely to score more.</p>
+    <p><b>Why</b> shows the biggest influences on this week's number, in points for the scoring you picked. Factors are sensitivities: how much the projection changes if that one input is reset to a neutral baseline. They are not causes and don't add up to the projection. <b>Vegas adjustment</b> is different: it is the actual change made when sportsbook props disagree with the model.
+      Click a player for details, then pick a second player to compare.</p>
   </div>
 
   <details class="key" id="key">
     <summary>What the factors mean</summary>
-    <p>Each factor is measured the same way: the model re-runs the player's projection with that factor reset to a neutral baseline, and the difference (in half-PPR points) is the factor's effect.
-      There are no fixed weights; the model learned from ten seasons of games how much each input matters, and the effect depends on the player (a factor can matter more for a pass-catcher than for a running back).
+    <p>Each factor is measured the same way: the model re-runs the player's projection with that one factor reset to a neutral baseline, holding everything else fixed, and the difference (in points for the scoring you picked) is the factor's effect.
+      That makes it a sensitivity, not a cause: the model has interactions, so the effects don't add up to the projection, and two factors can overlap.
+      There are no fixed weights; the model learned from ten seasons of games how much each input matters, and the effect depends on the player.
       Everything not listed here, mainly the player's own role and production, is the baseline projection itself.</p>
     <dl id="keylist"></dl>
+  </details>
+
+  <details class="score" id="score" hidden>
+    <summary>Scorecard: how every source has done this season</summary>
+    <div id="scorebody"></div>
   </details>
 </div>
 
@@ -201,7 +225,7 @@ function seg(el, opts, key) {
   el.innerHTML = opts.map(([v, l]) => `<button data-v="${v}" aria-pressed="${state[key] === v}">${l}</button>`).join("");
   el.onclick = e => {
     const v = e.target.dataset.v; if (!v) return;
-    state[key] = v; save(); seg(el, opts, key); render();
+    state[key] = v; save(); seg(el, opts, key); render(); if (data) renderScore(scorecard);
   };
 }
 function save() { try { localStorage.setItem("ssr-prefs", JSON.stringify({ pos: state.pos, fmt: state.fmt })); } catch (e) {} }
@@ -216,11 +240,14 @@ function sampler(q) {
     for (let i = 0; i < 4; i++) if (u <= P[i + 1]) return q[i] + (q[i + 1] - q[i]) * (u - P[i]) / (P[i + 1] - P[i]);
   };
 }
+// Share of simulated games where A outscores B, then corrected for the overconfidence the
+// backtest found (lopsided odds pulled toward 50%; slope from model_data/h2h_calibration.json).
 function headToHead(a, b) {
   const sa = sampler(a[state.fmt].q), sb = sampler(b[state.fmt].q);
   let win = 0, n = 20000;
   for (let i = 0; i < n; i++) if (sa(Math.random()) > sb(Math.random())) win++;
-  return win / n;
+  const raw = Math.min(Math.max(win / n, 1e-4), 1 - 1e-4), k = data.h2h_slope || 1;
+  return 1 / (1 + Math.exp(-k * Math.log(raw / (1 - raw))));
 }
 
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -260,13 +287,15 @@ function render() {
   if (!rows.length) { tb.innerHTML = `<tr><td colspan="6" class="empty">No players match.</td></tr>`; return; }
   tb.innerHTML = rows.map(p => {
     const f = p[state.fmt];
-    const chips = p.reasons.map(r => `<span class="chip ${r.pts > 0 ? "up" : "dn"}">${r.pts > 0 ? "+" : "−"}${Math.abs(r.pts).toFixed(1)} ${esc(r.label)}</span>`).join("");
+    const chip = r => `<span class="chip ${r.pts > 0 ? "up" : "dn"}${r.label === VEGAS ? " vg" : ""}">${r.pts > 0 ? "+" : "−"}${Math.abs(r.pts).toFixed(1)} ${esc(r.label)}</span>`;
+    const chips = (f.reasons || []).map(chip).join("");
+    const mob = `<div class="mob">${rangeSvg(f.q, max)}${f.reasons && f.reasons.length ? chip(f.reasons[0]) : ""}</div>`;
     const sel = state.pick.includes(p.id) ? " sel" : "";
     let html = `<tr class="row${sel}" data-id="${p.id}">
       <td class="rank num">${rankIn[p.id]}</td>
       <td><div class="pl">${p.headshot ? `<img src="${esc(p.headshot)}" alt="" loading="lazy">` : `<img alt="">`}
         <div><div class="nm">${esc(p.name)}${p.questionable ? '<span class="tag q">Q</span>' : ""}</div>
-        <div class="sub"><span class="pos-${p.pos}">${p.pos}</span> · ${p.team} ${p.home ? "vs" : "@"} ${p.opp} · ${fmtKick(p.kickoff)}</div></div></div></td>
+        <div class="sub"><span class="pos-${p.pos}">${p.pos}</span> · ${p.team} ${p.home ? "vs" : "@"} ${p.opp} · ${fmtKick(p.kickoff)}</div>${mob}</div></div></td>
       <td class="r num proj">${f.proj.toFixed(1)}</td>
       <td class="range">${rangeSvg(f.q, max)}</td>
       <td class="r num boom">${Math.round(f.boom * 100)}%</td>
@@ -281,18 +310,19 @@ function detailRow(p) {
   const s = p.stats, f = p[state.fmt], v = p.vegas || {};
   const vline = Object.keys(v).length
     ? `<div><b>Vegas props</b>${v.receptions != null ? v.receptions.toFixed(1) + " rec · " : ""}${v.rec_yards != null ? Math.round(v.rec_yards) + " rec yds · " : ""}${v.rush_yards != null ? Math.round(v.rush_yards) + " rush yds · " : ""}${v.tds != null ? Math.round((1 - Math.exp(-v.tds)) * 100) + "% TD" : ""}</div>
-       <div><b>Model alone (half)</b>${p.model_half.toFixed(1)} pts</div>` : `<div><b>Vegas props</b>Not available</div>`;
+       <div><b>Model alone</b>${f.model.toFixed(1)} pts</div>` : `<div><b>Vegas props</b>Not available</div>`;
   const tdp = Math.round((1 - Math.exp(-(s.rec_tds + s.rush_tds))) * 100);
   const ctx = p.context || {};
-  const factors = Object.entries(p.factors || {})
-    .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
-    .map(([k, v]) => `<tr><td class="fl">${esc(k)}</td><td class="fv num ${v >= 0.05 ? "up" : v <= -0.05 ? "dn" : ""}">${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(1)}</td><td class="fc">${esc(ctx[k] || "")}</td></tr>`).join("");
+  const frow = (k, v, cls = "") => `<tr class="${cls}"><td class="fl">${esc(k)}</td><td class="fv num ${v >= 0.05 ? "up" : v <= -0.05 ? "dn" : ""}">${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(1)}</td><td class="fc">${esc(ctx[k] || "")}</td></tr>`;
+  const factors = Object.entries(f.factors || {})
+    .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).map(([k, v]) => frow(k, v)).join("")
+    + frow(VEGAS, f.vegas || 0, "vegas");
   return `<tr class="detail"><td colspan="6"><div class="dgrid num">
     <div><b>Projected line</b>${s.receptions.toFixed(1)} rec · ${Math.round(s.rec_yards)} rec yds${s.carries >= 1 ? ` · ${s.carries.toFixed(1)} car · ${Math.round(s.rush_yards)} rush yds` : ""} · ${tdp}% TD</div>
     <div><b>Floor / Median / Ceiling</b>${f.q[0].toFixed(1)} / ${f.q[2].toFixed(1)} / ${f.q[4].toFixed(1)}</div>
     ${vline}
   </div>
-  <table class="ftab"><thead><tr><th>Factor</th><th class="r">Pts</th><th>Input this week</th></tr></thead><tbody>${factors}</tbody></table>
+  <table class="ftab"><thead><tr><th>Factor (sensitivity)</th><th class="r">Pts</th><th>Input this week</th></tr></thead><tbody>${factors}</tbody></table>
   <button class="cmpbtn" data-cmp="${p.id}">${state.pick.includes(p.id) ? "Remove from comparison" : "Compare with another player"}</button></td></tr>`;
 }
 
@@ -306,8 +336,13 @@ function renderCompare() {
     return;
   }
   const [a, b] = ps, pa = headToHead(a, b), fa = a[state.fmt], fb = b[state.fmt];
-  const leader = pa >= 0.5 ? a : b, lf = pa >= 0.5 ? fa : fb, of = pa >= 0.5 ? fb : fa;
-  const style = lf.q[4] - lf.q[0] > of.q[4] - of.q[0] ? "with a wider range (more boom and more bust)" : "with a steadier range";
+  const leader = pa >= 0.5 ? a : b, other = pa >= 0.5 ? b : a, lp = Math.max(pa, 1 - pa);
+  const gap = fa.proj - fb.proj, hi = gap >= 0 ? a : b;
+  const gapText = Math.abs(gap) < 0.05 ? "The projections are even."
+    : `${esc(hi.name)} is projected ${Math.abs(gap).toFixed(1)} pts higher.`;
+  const close = lp < 0.55 ? " That's close to a coin flip." : "";
+  const linked = a.team === b.team ? `Teammates: they share targets and the same game, so their outcomes are linked. This comparison treats them as independent, so take the percentage as rough.`
+    : (a.opp === b.team) ? `Same game: a shootout or a blowout lifts or sinks both. This comparison treats them as independent, so take the percentage as rough.` : "";
   el.innerHTML = `<div class="head"><span>Head to head · ${FMT.find(x => x[0] === state.fmt)[1]}</span><button data-clear>Clear</button></div>
     <div class="vs">
       <div class="side"><div class="nm">${esc(a.name)}</div><div class="pct num">${Math.round(pa * 100)}%</div><div class="sub num" style="color:var(--muted);font-size:12px">${fa.proj.toFixed(1)} proj · ${Math.round(fa.boom * 100)}% boom</div></div>
@@ -315,7 +350,9 @@ function renderCompare() {
       <div class="side r"><div class="nm">${esc(b.name)}</div><div class="pct num">${Math.round((1 - pa) * 100)}%</div><div class="sub num" style="color:var(--muted);font-size:12px">${fb.proj.toFixed(1)} proj · ${Math.round(fb.boom * 100)}% boom</div></div>
     </div>
     <div class="splitbar"><span style="width:${pa * 100}%"></span></div>
-    <div class="note">Start <b>${esc(leader.name)}</b>, ${style}. Too close to call if it's within 45–55%.</div>`;
+    <div class="note"><b>${esc(leader.name)}</b> scores more than ${esc(other.name)} in ${Math.round(lp * 100)}% of simulated games.${close} ${gapText}
+      Simulations use each player's range, adjusted so these percentages match how often favorites actually won in past seasons. It doesn't know the rest of your lineup.</div>
+    ${linked ? `<div class="flag">${linked}</div>` : ""}`;
 }
 
 document.getElementById("rows").onclick = e => {
@@ -343,8 +380,24 @@ const shortDay = ymd => { const t = new Date(ymd + "T12:00"); return `${t.toLoca
 
 const HOUR = 36e5, DAY = 24 * HOUR;
 const STATE_TEXT = { ok: "Current", wait: "Waiting", stale: "Stale" };
+const VEGAS = "Vegas adjustment";
 // Age-based status for sources refreshed on every run (nightly at minimum).
 const byAge = iso => { const age = Date.now() - new Date(iso); return age < 26 * HOUR ? "ok" : age < 50 * HOUR ? "wait" : "stale"; };
+
+// Weather: "Indoors" only when no game needs a forecast; failures never read as indoors.
+function weatherState(f) {
+  const want = f.outdoor_expected ?? f.outdoor_games ?? 0, got = f.outdoor_games || 0;
+  if (!want) return ["ok", "Every game this week is under a roof (or at a neutral site)"];
+  if (!got) return ["stale", `Forecasts failed for all ${want} outdoor games; weather is treated as unknown`];
+  if (got < want) return ["wait", `Forecasts for ${got} of ${want} outdoor games; the rest show "Forecast unavailable"`];
+  return [f.weather ? byAge(f.weather) : "wait", `Kickoff forecast (wind, temperature) for ${got} outdoor games`];
+}
+function weatherValue(f) {
+  const want = f.outdoor_expected ?? f.outdoor_games ?? 0, got = f.outdoor_games || 0;
+  if (!want) return "Indoors";
+  if (!got) return "Unavailable";
+  return f.weather ? shortTime(f.weather) : "Unverified";
+}
 
 function sourceStates(d) {
   const f = d.freshness, now = Date.now();
@@ -355,13 +408,12 @@ function sourceStates(d) {
       : now < nextDue + 6 * HOUR ? ["wait", "The last scheduled run is a little late"]
       : ["stale", "A scheduled run was missed; data may be out of date"],
     injuries: f.injuries ? [byAge(f.injuries), "Injury designations, IR and inactives. Players ruled out are removed and their targets and carries redistributed."]
-      : ["stale", "Injury data unavailable on the last run"],
-    weather: !f.weather ? ["ok", "Every game this week is under a roof"]
-      : [byAge(f.weather), `Kickoff forecast (wind, temperature) for ${f.outdoor_games} outdoor games`],
+      : ["wait", "Unverified: injury statuses were used, but we couldn't confirm when they were last updated"],
+    weather: weatherState(f),
     lines: f.lines ? [byAge(f.lines), "Spread and over/under for every game, which set each team's implied points. Time is when the lines were last published."]
-      : ["stale", "Game lines unavailable on the last run"],
-    props: f.props ? [now - new Date(f.props) < 4 * DAY ? "ok" : "wait", `Player prop lines for ${f.props_games} games (receptions, yards, anytime TD) from DraftKings, FanDuel and other books, blended 50/50 with the model`]
-      : now < new Date(f.props_next).getTime() + HOUR ? ["wait", "Props are pulled once a week, Sunday 11:45 AM ET, when lines are sharpest. Until then projections are model-only."]
+      : ["wait", "Unverified: lines are loaded, but we couldn't confirm when nflverse last published them"],
+    props: f.props ? [now - new Date(f.props) < 4 * DAY ? "ok" : "wait", `Player prop lines for ${f.props_games} games (receptions, yards, anytime TD) from DraftKings, FanDuel and other books, half of each gap between props and the model is applied`]
+      : now < new Date(f.props_next).getTime() + 3 * HOUR ? ["wait", "Props are pulled once a week, late Sunday morning ET (first try 11:15, retry 11:45), when lines are sharpest. Until then projections are model-only."]
       : ["stale", "The scheduled props pull didn't happen; projections are model-only"],
     stats: f.stats_through >= (f.games_through || "") ? ["ok", "Stats, snaps and usage include every completed game"]
       : lag < 3 * DAY ? ["wait", "Recent games are played; their stats usually arrive within a day"]
@@ -383,14 +435,36 @@ function renderStatus(d) {
       <div class="nxt">Next · ${esc(shortTime(f.next))}</div>
     </div>
     <div class="srcs">
-      ${cell("Injuries", f.injuries ? shortTime(f.injuries) : "—", st.injuries)}
-      ${cell("Weather", f.weather ? shortTime(f.weather) : "Indoors", st.weather)}
-      ${cell("Game lines", f.lines ? shortTime(f.lines) : "—", st.lines)}
+      ${cell("Injuries", f.injuries ? shortTime(f.injuries) : "Unverified", st.injuries)}
+      ${cell("Weather", weatherValue(f), st.weather)}
+      ${cell("Game lines", f.lines ? shortTime(f.lines) : "Unverified", st.lines)}
       ${cell("Vegas props", f.props ? shortTime(f.props) : shortTime(f.props_next), st.props)}
       ${cell("Stats", shortDay(f.stats_through), st.stats)}
     </div>`;
   el.hidden = false;
 }
+
+const SC_ORDER = ["published", "model", "blend", "ecr", "sleeper", "espn", "naive"];
+function renderScore(sc) {
+  const s = sc && sc.summary && sc.summary[String(data.season)];
+  const el = document.getElementById("score");
+  const body = document.getElementById("scorebody");
+  el.hidden = false;
+  if (!s || !s.weeks) {
+    body.innerHTML = `<p>No finished weeks graded yet. Each week, every source is graded on its last forecast before each player's kickoff: our rankings, our model alone, FantasyPros experts, Sleeper, ESPN, a recent-average baseline and a model + expert blend. The first results appear the Tuesday after this week's games.</p>`;
+    return;
+  }
+  const names = sc.source_names || {}, fmt = state.fmt;
+  const pct = x => x == null ? "–" : (x * 100).toFixed(1) + "%";
+  const rows = SC_ORDER.filter(k => s.sources[k] && s.sources[k][fmt]).map(k => {
+    const e = s.sources[k][fmt], c = e.vs_ecr;
+    const ci = c && c.diff != null ? `${(c.diff * 100 >= 0 ? "+" : "")}${(c.diff * 100).toFixed(1)} (${(c.lo * 100).toFixed(1)} to ${(c.hi * 100).toFixed(1)})` : (k === "ecr" ? "reference" : "–");
+    return `<tr><td>${esc(names[k] || k)}</td><td class="r num">${pct(e.pair)}</td><td class="r num">${pct(e.close)}</td><td class="r num">${e.lost == null ? "–" : e.lost.toFixed(2)}</td><td class="r num ci">${ci}</td></tr>`;
+  }).join("");
+  body.innerHTML = `<p>${s.weeks} week${s.weeks === 1 ? "" : "s"} graded, ${FMT.find(x => x[0] === fmt)[1]} scoring. <b>Start/sit</b>: for two players at the same position, how often the source put the higher scorer first. <b>Close calls</b>: pairs the experts ranked within 5 spots. <b>Pts lost</b>: points left on the bench per decision. Players recommended who didn't play count as 0. A handful of weeks is mostly noise; the range in the last column shows how uncertain the difference from the experts still is.</p>
+    <div class="scroll"><table class="stab"><thead><tr><th>Source</th><th class="r">Start/sit</th><th class="r">Close calls</th><th class="r">Pts lost</th><th class="r">vs. experts (95% range)</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+let scorecard = null;
 
 fetch("data/rankings.json", { cache: "no-cache" }).then(r => r.json()).then(d => {
   data = d;
@@ -401,6 +475,8 @@ fetch("data/rankings.json", { cache: "no-cache" }).then(r => r.json()).then(d =>
   seg(document.getElementById("pos"), POS, "pos");
   seg(document.getElementById("fmt"), FMT, "fmt");
   render();
+  fetch("data/scorecard.json", { cache: "no-cache" }).then(r => r.ok ? r.json() : null)
+    .then(sc => { scorecard = sc; renderScore(sc); }).catch(() => renderScore(null));
 }).catch(() => {
   document.getElementById("rows").innerHTML = `<tr><td colspan="6" class="empty">Rankings unavailable. The next scheduled run will publish them.</td></tr>`;
 });

@@ -10,7 +10,8 @@ from .live import _norm, market_means
 from .features import score
 from .model import COMPONENTS, QUANTILES
 
-MARKET_WEIGHT = 0.5  # share of each component taken from Vegas when a prop exists
+MARKET_WEIGHT = 0.5  # share of the market-vs-model gap applied when a prop exists (a judgment call)
+VEGAS_LABEL = "Vegas adjustment"
 
 # Feature groups we "neutralize" one at a time to explain a projection.
 GROUPS = {
@@ -36,8 +37,10 @@ FACTOR_KEY = {
                  "ruled out or on IR. Baseline: a fully healthy secondary.",
     "teammates": "Share of the team's recent targets and carries belonging to teammates who are out "
                  "this week, which frees up opportunities. Baseline: nobody missing.",
-    "qb": "This week's starting QB's efficiency (EPA per dropback over his recent career) compared "
-          "with the QB play behind this player's recent stats. Positive means an upgrade. "
+    "qb": "This week's starting QB's longer-run efficiency (EPA per dropback, weighted toward "
+          "recent games) compared with the QB play behind this player's recent stats. With a new "
+          "starter, this is the upgrade or downgrade. With the same starter, it is the model "
+          "expecting his recent form to drift back toward his longer track record. "
           "Baseline: the same quality of QB play as recent weeks.",
     "weather": "Kickoff forecast for outdoor stadiums (wind and temperature). Domes and retractable "
                "roofs are neutral. Baseline: 65°F with 5 mph wind.",
@@ -46,12 +49,24 @@ FACTOR_KEY = {
 }
 
 
+VEGAS_KEY = ("When sportsbooks offer player props (receptions, yards, anytime TD), each prop is turned into "
+             "an expected stat and compared with the model's own estimate. Half of the difference is added "
+             "to the projection, so props that agree with the model change nothing. Not a sensitivity like "
+             "the factors above: it is the actual change made to the model's number.")
+
+
 def explain(model, live, train):
-    """Half-PPR points each feature group adds vs. a neutral baseline."""
-    base = model.predict(live)["half_proj"].to_numpy()
+    """Points each feature group adds vs. a neutral baseline, per scoring format.
+
+    These are sensitivities: re-predict with one group reset to its baseline,
+    everything else held fixed. They are not causal and don't sum to the
+    projection (the model has interactions). Returns {fmt: DataFrame}.
+    """
+    base_pred = model.predict(live)
     matchup_cols = [c for c in model.features if c.startswith("def_")]
     recent = train[train.season >= train.season.max() - 1]
-    out = {}
+    out = {fmt: {} for fmt in SCORING}
+    no_forecast = (live.dome == 0) & live.temp.isna()  # unknown weather: no effect to explain
     for key, (cols, _) in GROUPS.items():
         cols = matchup_cols if cols is None else cols
         alt = live.copy()
@@ -65,18 +80,32 @@ def explain(model, live, train):
             else:  # league-typical value for this position
                 med = recent.groupby("position")[c].median()
                 alt[c] = alt.position.map(med)
-        out[key] = base - model.predict(alt)["half_proj"].to_numpy()
-    return pd.DataFrame(out, index=live.index)
+        alt_pred = model.predict(alt)
+        for fmt in SCORING:
+            eff = base_pred[f"{fmt}_proj"].to_numpy() - alt_pred[f"{fmt}_proj"].to_numpy()
+            if key == "weather":
+                eff = np.where(no_forecast, 0.0, eff)
+            out[fmt][key] = eff
+    return {fmt: pd.DataFrame(v, index=live.index) for fmt, v in out.items()}
 
 
 def blend_market(pred, live_players, raw_props):
-    """Blend projections with Vegas player props where available.
+    """Adjust projections toward Vegas player props where available.
 
-    The market view is the model's stat line with each prop-implied stat
-    substituted in; the published projection is MARKET_WEIGHT of that.
+    The market view is the model's own component stat line with each
+    prop-implied stat substituted in. The adjustment is MARKET_WEIGHT times
+    (market view − the model's component view), added on top of the full
+    projection. So a prop that matches the model changes nothing; only the
+    disagreement moves the number. Model-only numbers stay in model_{fmt}.
     """
     mk = market_means(raw_props)
     pred["market"] = False
+    for fmt in SCORING:
+        pred[f"model_{fmt}"] = pred[f"{fmt}_proj"]
+        pred[f"{fmt}_vegas"] = 0.0
+    for c in COMPONENTS:
+        pred[f"model_{c}"] = pred[f"proj_{c}"]
+    pred["model_tds"] = pred.proj_rec_tds + pred.proj_rush_tds
     if mk.empty:
         return pred
     mk = mk.drop_duplicates("name_key").set_index("name_key")
@@ -97,11 +126,13 @@ def blend_market(pred, live_players, raw_props):
         mcomp["rush_tds"] *= scale
         pred["market"] |= m.notna()
     has = pred.market
+    model_comp = pd.DataFrame({c: pred[f"proj_{c}"] for c in COMPONENTS})
     for fmt in SCORING:
-        pred.loc[has, f"{fmt}_proj"] = ((1 - MARKET_WEIGHT) * pred[f"{fmt}_proj"]
-                                        + MARKET_WEIGHT * score(mcomp, fmt))[has]
+        adj = (MARKET_WEIGHT * (score(mcomp, fmt) - score(model_comp, fmt))).where(has, 0.0)
+        pred[f"{fmt}_vegas"] = adj
+        pred[f"{fmt}_proj"] = (pred[f"{fmt}_proj"] + adj).clip(lower=0)
     for c in COMPONENTS:  # displayed stat line
-        pred.loc[has, f"proj_{c}"] = ((1 - MARKET_WEIGHT) * pred[f"proj_{c}"] + MARKET_WEIGHT * mcomp[c])[has]
+        pred.loc[has, f"proj_{c}"] = (model_comp[c] + MARKET_WEIGHT * (mcomp[c] - model_comp[c]))[has]
     return pred
 
 
@@ -125,9 +156,9 @@ def context(live, train, names):
                        f"{int(opp_rank.loc[(r.position, r.opp), 'n'])} opponents this week)",
             "secondary": f"{int(r.db_out_n)} regular {r.opp} DB{'s' if r.db_out_n != 1 else ''} out",
             "teammates": f"{r.vac_tgt:.0%} of targets and {r.vac_car:.0%} of carries vacated by injured teammates",
-            "qb": f"{names.get(r.qb_id, 'Unknown QB')} {r.qb_epa:+.2f} EPA/dropback vs. "
-                  f"{r.team}'s recent {r.tm_epa_per_db:+.2f}",
-            "weather": "Dome / roof" if dome else f"{r.temp:.0f}°F, wind {r.wind:.0f} mph",
+            "qb": _qb_text(r, names),
+            "weather": "Dome / roof" if dome else ("Forecast unavailable" if pd.isna(r.temp) or pd.isna(r.wind)
+                                                  else f"{r.temp:.0f}°F, wind {r.wind:.0f} mph"),
             "health": {0: "No injury designation", 1: "Questionable", 2: "Doubtful"}.get(int(r.inj_report), "Listed")
                       + {0: "", 1: ", limited practice", 2: ", did not practice"}.get(int(r.inj_practice), ""),
         }
@@ -135,7 +166,38 @@ def context(live, train, names):
     return out
 
 
+def _qb_text(r, names):
+    qb = names.get(r.qb_id, "Unknown QB")
+    if pd.isna(r.qb_epa) or pd.isna(r.tm_epa_per_db):
+        return f"{qb}: not enough history to compare"
+    if r.qb_change:
+        return (f"New starter {qb}: {r.qb_epa:+.2f} EPA/dropback over his longer run vs. "
+                f"{r.team}'s recent {r.tm_epa_per_db:+.2f}")
+    if abs(r.qb_epa - r.tm_epa_per_db) < 0.03:
+        return f"Same starter, {qb}, playing at his usual level ({r.qb_epa:+.2f} EPA/dropback)"
+    trend = "above" if r.tm_epa_per_db > r.qb_epa else "below"
+    drift = "some regression" if trend == "above" else "a bounce-back"
+    return (f"Same starter, {qb}, playing {trend} his usual level lately ({r.tm_epa_per_db:+.2f} vs. "
+            f"his longer-run {r.qb_epa:+.2f} EPA/dropback); the model expects {drift}")
+
+
+def _vegas_text(r):
+    if not r.get("market", False):
+        return "No props for this player; projection is model-only"
+    bits = []
+    for k, lab, f in (("receptions", "rec", "{:.1f}"), ("rec_yards", "rec yds", "{:.0f}"),
+                      ("rush_yards", "rush yds", "{:.0f}")):
+        m = r.get(f"mkt_{k}")
+        if m is not None and pd.notna(m):
+            bits.append(f"{lab} {f.format(m)} (model {f.format(r[f'model_{k}'])})")
+    t = r.get("mkt_tds")
+    if t is not None and pd.notna(t):
+        bits.append(f"TD {1 - np.exp(-t):.0%} (model {1 - np.exp(-r['model_tds']):.0%})")
+    return f"Props vs. model: {'; '.join(bits)}. Half of each gap is applied"
+
+
 def to_json(pred, reasons, live_players, games, season, week, meta, ctx=None):
+    """reasons: {fmt: DataFrame of factor effects} from explain()."""
     info = live_players.set_index("player_id")
     gm = {}
     for g in games.itertuples():
@@ -144,9 +206,6 @@ def to_json(pred, reasons, live_players, games, season, week, meta, ctx=None):
     players = []
     for i, r in pred.iterrows():
         pid = r.player_id
-        rs = reasons.loc[i]
-        top = rs[rs.abs() >= 0.3]
-        top = top.reindex(top.abs().sort_values(ascending=False).index).head(3)
         p = {
             "id": pid, "name": info.name.get(pid, pid), "pos": r.position, "team": r.team,
             "opp": r.opp, "home": gm.get(r.team, {}).get("home"),
@@ -156,18 +215,24 @@ def to_json(pred, reasons, live_players, games, season, week, meta, ctx=None):
             "market": bool(r.get("market", False)),
             "stats": {k: round(float(r[f"proj_{k}"]), 2) for k in
                       ("receptions", "rec_yards", "rec_tds", "carries", "rush_yards", "rush_tds")},
-            "reasons": [{"label": GROUPS[k][1], "pts": round(float(v), 1)} for k, v in top.items()],
-            "factors": {GROUPS[k][1]: round(float(v), 2) for k, v in rs.items()},
-            "context": (ctx or {}).get(i, {}),
-            "model_half": round(float(r.get("model_half", r["half_proj"])), 1),
+            "context": {**(ctx or {}).get(i, {}), VEGAS_LABEL: _vegas_text(r)},
             "vegas": {k: round(float(r[f"mkt_{k}"]), 2) for k in ("receptions", "rec_yards", "rush_yards", "tds")
                       if f"mkt_{k}" in r and pd.notna(r[f"mkt_{k}"])},
         }
         for fmt in SCORING:
+            rs = reasons[fmt].loc[i].rename(lambda k: GROUPS[k][1])
+            vegas = float(r.get(f"{fmt}_vegas", 0.0))
+            chips = pd.concat([rs, pd.Series({VEGAS_LABEL: vegas})])
+            top = chips[chips.abs() >= 0.3]
+            top = top.reindex(top.abs().sort_values(ascending=False).index).head(3)
             p[fmt] = {
                 "proj": round(float(r[f"{fmt}_proj"]), 1),
+                "model": round(float(r.get(f"model_{fmt}", r[f"{fmt}_proj"])), 1),
+                "vegas": round(vegas, 2),
                 "q": [round(float(r[f"{fmt}_q{int(q * 100)}"]), 1) for q in QUANTILES],
                 "boom": round(float(r[f"{fmt}_boom"]), 3),
+                "reasons": [{"label": k, "pts": round(float(v), 1)} for k, v in top.items()],
+                "factors": {k: round(float(v), 2) for k, v in rs.items()},
             }
         players.append(p)
     return {
@@ -175,16 +240,21 @@ def to_json(pred, reasons, live_players, games, season, week, meta, ctx=None):
         "generated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="minutes"),
         "quantiles": QUANTILES, "boom_threshold": 20,
         "factor_key": [{"label": GROUPS[k][1], "text": t,
-                        "typical": round(float(reasons.loc[pred.half_proj >= 8, k].abs().median()), 2),
-                        "max": round(float(reasons.loc[pred.half_proj >= 8, k].abs().max()), 1)}
-                       for k, t in FACTOR_KEY.items()],
+                        "typical": round(float(reasons["half"].loc[pred.half_proj >= 8, k].abs().median()), 2),
+                        "max": round(float(reasons["half"].loc[pred.half_proj >= 8, k].abs().max()), 1)}
+                       for k, t in FACTOR_KEY.items()]
+                      + [{"label": VEGAS_LABEL, "text": VEGAS_KEY,
+                          "typical": round(float(pred.loc[pred.market & (pred.half_proj >= 8), "half_vegas"].abs().median()), 2)
+                          if (pred.market & (pred.half_proj >= 8)).any() else 0.0,
+                          "max": round(float(pred.loc[pred.half_proj >= 8, "half_vegas"].abs().max()), 1)
+                          if (pred.half_proj >= 8).any() else 0.0}],
         **meta, "players": players,
     }
 
 
-def write(payload, season, week):
+def write(payload):
+    """The current rankings for the page. Per-run history is archive.py's job (immutable)."""
     data_dir = OUTPUT_DIR / "data"
-    (data_dir / "history").mkdir(parents=True, exist_ok=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
     text = json.dumps(payload, separators=(",", ":"), default=lambda o: None if pd.isna(o) else str(o))
     (data_dir / "rankings.json").write_text(text)
-    (data_dir / "history" / f"{season}_w{week:02d}.json").write_text(text)

@@ -219,8 +219,9 @@ def _distribution_section(p, fmt):
     return lines
 
 
-def _h2h_section(p, fmt="ppr", max_pairs=60000):
-    """Calibration of head-to-head probabilities for same-position pairs in the experts' top N."""
+def h2h_pairs(p, fmt="ppr", max_pairs=60000):
+    """(stated P(first scores more), first actually scored more) for same-position
+    pairs in the experts' top N, using the page's method. Exact ties dropped."""
     rng = np.random.default_rng(0)
     qa, qb, wins = [], [], []
     qcols = [f"{fmt}_q{int(q * 100)}" for q in QUANTILES]
@@ -238,14 +239,44 @@ def _h2h_section(p, fmt="ppr", max_pairs=60000):
         k = rng.choice(len(wins), max_pairs, replace=False)
         qa, qb, wins = qa[k], qb[k], wins[k]
     prob = np.concatenate([h2h_prob(qa[s:s + 5000], qb[s:s + 5000]) for s in range(0, len(qa), 5000)])
+    return prob, wins
+
+
+def fit_h2h_slope(p, fmt="ppr"):
+    """Recalibration for head-to-head odds: P_shown = sigmoid(slope * logit(P_raw)).
+
+    One parameter, no intercept (the pair order is arbitrary, so the map must be
+    symmetric around 50%). slope < 1 pulls overconfident odds toward 50%.
+    """
+    from scipy.optimize import minimize_scalar
+    prob, wins = h2h_pairs(p, fmt)
+    z = np.log(np.clip(prob, 1e-4, 1 - 1e-4) / np.clip(1 - prob, 1e-4, 1))
+    y = wins.astype(float)
+
+    def nll(a):
+        q = 1 / (1 + np.exp(-a * z))
+        return -np.mean(y * np.log(q) + (1 - y) * np.log(1 - q))
+    return float(minimize_scalar(nll, bounds=(0.2, 2.0), method="bounded").x)
+
+
+def _h2h_section(p, fmt="ppr", max_pairs=60000):
+    """Calibration of head-to-head probabilities for same-position pairs in the experts' top N."""
+    prob, wins = h2h_pairs(p, fmt, max_pairs)
+    slope = fit_h2h_slope(p, fmt)
     # Orient every pair so the stated probability is for the favorite.
     fav = prob >= 0.5
     pf, hit = np.where(fav, prob, 1 - prob), np.where(fav, wins, ~wins)
     cal = calibration_table(pf, hit.astype(float), [0.5, 0.55, 0.6, 0.65, 0.7, 0.8, 0.9, 1.0])
     brier = np.mean((pf - hit) ** 2)
+    z = np.log(pf / (1 - pf))
+    pc = 1 / (1 + np.exp(-slope * z))
+    cal2 = calibration_table(pc, hit.astype(float), [0.5, 0.55, 0.6, 0.65, 0.7, 0.8, 0.9, 1.0])
     return [f"  {len(pf)} pairs, Brier score {brier:.4f} (lower is better; always saying 50% scores 0.25)",
             "  favorite's stated chance vs. how often the favorite actually scored more:",
-            *("    " + ln for ln in cal.round(3).to_string().splitlines())]
+            *("    " + ln for ln in cal.round(3).to_string().splitlines()),
+            f"  after the page's correction (slope {slope:.3f}; fit on these same pairs, so in-sample), "
+            f"Brier {np.mean((pc - hit) ** 2):.4f}:",
+            *("    " + ln for ln in cal2.round(3).to_string().splitlines())]
 
 
 def summarize(p, weekly):

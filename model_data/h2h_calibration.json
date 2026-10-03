@@ -1,0 +1,10 @@
+{
+ "slope": 0.8655,
+ "fit_on": "sunday backtest, PPR, same-position top-N pairs",
+ "seasons": [
+  2022,
+  2023,
+  2024,
+  2025
+ ]
+}

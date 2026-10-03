@@ -15,6 +15,7 @@ from .features import DB_POSITIONS
 
 log = logging.getLogger(__name__)
 ODDS_BASE = "https://api.the-odds-api.com/v4/sports/americanfootball_nfl"
+PROPS_REUSE_HOURS = 8  # covers the 11:15 attempt, 11:45 retry and catch-up runs (MAX_LATE_HOURS)
 PROP_MARKETS = ["player_reception_yds", "player_receptions", "player_rush_yds", "player_anytime_td"]
 
 
@@ -116,17 +117,25 @@ def availability(d, season, week, games):
         if gs_by_pfr.get(pid) in nfl_out:
             db_out.add(pid)
     players.attrs["injuries_at"] = raw_sp.attrs.get("fetched_at")
+    players.attrs["ruled_out"] = sorted(cands.gsis_id[out].astype(str))
     return players, db_out, sp
 
 
 # ---------------------------------------------------------------- weather
 
+def outdoor_games(games):
+    """Games we try to forecast: outdoor home stadiums, not neutral sites (no coordinates)."""
+    return games[(games.location != "Neutral") & games.home_team.isin(OUTDOOR_STADIUMS.keys())]
+
+
 def weather(games):
-    """Kickoff forecasts (temp F, wind mph) for outdoor games from Open-Meteo."""
+    """Kickoff forecasts (temp F, wind mph) for outdoor games from Open-Meteo.
+
+    Games that fail (or are at neutral sites) are simply absent: the model then
+    treats weather as unknown and the page says "Forecast unavailable".
+    """
     rows = []
-    for g in games.itertuples():
-        if g.location == "Neutral" or g.home_team not in OUTDOOR_STADIUMS:
-            continue
+    for g in outdoor_games(games).itertuples():
         lat, lon = OUTDOOR_STADIUMS[g.home_team]
         try:
             r = requests.get("https://api.open-meteo.com/v1/forecast", timeout=30, params={
@@ -138,8 +147,10 @@ def weather(games):
             hour = int(str(g.gametime).split(":")[0])
             # Average over the ~3 game hours starting at kickoff.
             w = h.iloc[hour:hour + 3]
-            rows.append({"game_id": g.game_id, "temp": w.temperature_2m.mean(),
-                         "wind": w.wind_speed_10m.mean(), "precip": w.precipitation.sum()})
+            temp, wind = w.temperature_2m.mean(), w.wind_speed_10m.mean()
+            if pd.isna(temp) or pd.isna(wind):
+                raise ValueError("forecast has no values for the game hours")
+            rows.append({"game_id": g.game_id, "temp": temp, "wind": wind, "precip": w.precipitation.sum()})
         except Exception as e:  # weather is a nice-to-have; never fail the run
             log.warning("weather failed for %s: %s", g.game_id, e)
     return pd.DataFrame(rows, columns=["game_id", "temp", "wind", "precip"])
@@ -169,14 +180,15 @@ def _read_props(path):
 def fetch_props(season, week, games, allow_fetch):
     """(fetched_at, raw events) for the week's props, saved per week in data/props/.
 
-    A pull from the last 3 hours is reused even when fetching is allowed, so a
-    retried or duplicate Sunday run never spends Odds API credits twice.
+    A pull from the last PROPS_REUSE_HOURS is reused even when fetching is allowed,
+    so the Sunday 11:15 attempt, the 11:45 retry and any late catch-up run spend
+    Odds API credits at most once.
     """
     path = PROPS_DIR / f"{season}_w{week:02d}.json"
     PROPS_DIR.mkdir(parents=True, exist_ok=True)
     fetched_at, saved = _read_props(path)
     key = os.environ.get("ODDS_API_KEY")
-    recent = fetched_at is not None and pd.Timestamp.now(tz="UTC") - fetched_at < pd.Timedelta(hours=3)
+    recent = fetched_at is not None and pd.Timestamp.now(tz="UTC") - fetched_at < pd.Timedelta(hours=PROPS_REUSE_HOURS)
     if not allow_fetch or not key or recent:
         if allow_fetch and recent:
             log.info("reusing props fetched at %s", fetched_at)

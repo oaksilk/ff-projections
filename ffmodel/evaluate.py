@@ -24,7 +24,7 @@ LIVE_DIR = ROOT / "reports" / "live"
 SCORES = LIVE_DIR / "scores.csv"
 ET = ZoneInfo("America/New_York")
 LABELS = {"fri": "Friday evening", "sun": "Sunday before kickoff"}
-BACKTEST_REF = "2022–2025 backtest: us 61.8%, experts 61.6%"
+BACKTEST_REF = "2022–2025 backtest: statistically tied with the experts (61.6% vs 61.7%, Friday information)"
 
 
 def report_path(season, week):
@@ -244,6 +244,10 @@ def evaluate_week(d, season, week):
         body += ["", "## Season wrap-up", "",
                  f"That was the last regular-season week. Final {season} numbers are above and in "
                  "`reports/live/SUMMARY.md`. Rankings pause until about 9 days before next season's opener."]
+    from .scorecard import markdown as scorecard_md
+    sc = scorecard_md(season, week)
+    if sc:
+        body += ["", sc]
     if notes:
         body += ["", "## Notes", "", *[f"- {n}" for n in notes]]
     out = report_path(season, week)
