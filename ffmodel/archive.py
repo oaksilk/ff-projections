@@ -18,6 +18,7 @@ import datetime as dt
 import hashlib
 import json
 import logging
+import time
 
 import pandas as pd
 import requests
@@ -168,13 +169,16 @@ def third_party_record(season, week, ff_ids):
     for name, fn in (("ecr", lambda: ecr_now(ff_ids)),
                      ("sleeper", lambda: sleeper_projections(season, week, ff_ids)),
                      ("espn", lambda: espn_projections(season, week, ff_ids))):
-        try:
-            rec[name] = fn()
-            log.info("archived %d %s rows", len(rec[name]), name)
-        except Exception as e:  # unofficial / third-party: never fail the run
-            log.warning("third-party %s unavailable: %s", name, e)
-            rec[name] = None
-            rec["meta"][f"{name}_error"] = str(e)[:300]
+        for attempt in range(3):  # downloads time out now and then; retry before giving up
+            try:
+                rec[name] = fn()
+                log.info("archived %d %s rows", len(rec[name]), name)
+                break
+            except Exception as e:  # unofficial / third-party: never fail the run
+                log.warning("third-party %s unavailable (attempt %d): %s", name, attempt + 1, e)
+                rec[name] = None
+                rec["meta"][f"{name}_error"] = str(e)[:300]
+                time.sleep(10 * (attempt + 1))
     return rec
 
 
