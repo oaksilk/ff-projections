@@ -280,6 +280,14 @@ offers:
   - **Red (filled):** stale. Over 50h old, a missed scheduled run, a missed
     props pull, or every weather forecast failing.
 
+  Every time carries its day ("Today 4:24 PM", "Fri 4:09 PM", "Through Thu
+  10/1"); a bare time reads as today. Each cell has a second line saying what
+  the time means or what comes next ("Weekly · next Sun 11:15 AM", "Every
+  game played is in"). Color is status, not age: a source from Thursday is
+  green if nothing newer exists. Calm (green) times stay neutral text; yellow
+  and red states also tint the time, so problems stand out at a glance.
+  Phones show the sources in two columns.
+
   A missing timestamp for data that *was* loaded (game lines, injuries) shows
   **"Unverified"** in yellow, not "unavailable". Weather says "Indoors" only
   when no game needs a forecast; failed or partial forecasts say so, and those
@@ -497,4 +505,7 @@ backtest. Compare against the table above; don't ship regressions.
 | 2026-10-03 | Gate check twice an hour at :17/:47; builds any due-but-unserved slot (≤6 h late) via `data/run_state.json`; Sun 11:15 props attempt backs up 11:45; props reuse window 8 h | Crons fired 2h46m and 4h41m late on 2026-10-02 and the on-time-only gate rejected them. Top-of-hour crons are GitHub's most delayed. One props pull per Sunday is preserved |
 | 2026-10-03 | Hourly injury check (8 AM–11 PM ET): rebuild if ESPN injury statuses for QB/RB/WR/TE/DB changed (≤1 per 55 min, no props) | Breaking news appears within about an hour instead of at the next slot, at no cost |
 | 2026-10-03 | Live runs train on the SUNDAY information set from Sun 11:30 ET, FRIDAY otherwise | Training history must match what the run itself can know (gameday inactives) |
+| 2026-10-03 | Freshness times always show their day plus a "what this means / next" line; status color unchanged (green = nothing newer exists), attention states tint the text | Owner found "4:24 PM / Fri 4:09 PM / Thu 10/1" hard to read. Coloring by "not today" would make weekly sources yellow most of the week, so people would learn to ignore yellow |
+| 2026-10-03 | "Vegas adjustment" renamed "Betting market"; detail row shows "Our model X · Betting market Y · we split the difference → Z" | Owner asked how the adjustment relates to the model; "adjustment" read like a fudge factor |
+| 2026-10-03 | Boom column labeled "Boom (20+ pts)"; threshold stays 20 points for every position | Owner: a single objective threshold is what makes flex comparisons legible |
 

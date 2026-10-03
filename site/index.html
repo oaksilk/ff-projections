@@ -60,11 +60,14 @@ header .sub { margin: 0; color: var(--muted); }
 .status .dot.ok { background: var(--ok); }
 .status .dot.wait { background: transparent; box-shadow: inset 0 0 0 2px var(--wait); }
 .status .dot.stale { background: var(--stale); }
+/* Times in a calm state stay neutral; only states that need attention tint the text. */
+.status .val.wait { color: var(--warn); } .status .val.stale { color: var(--stale); }
+.status .src .sub2 { font-size: 11px; color: var(--muted); margin-top: 3px; line-height: 1.3; }
 @media (max-width: 760px) {
   .status { grid-template-columns: 1fr; }
   .status .anchor { border-right: 0; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; }
   .status .anchor .val { margin-top: 0; }
-  .status .srcs { grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 2px 4px 4px; }
+  .status .srcs { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 2px 4px 4px; }
   .status .src { padding: 9px 10px; }
 }
 .num { font-family: "JetBrains Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
@@ -113,6 +116,10 @@ tr.row.sel td { background: var(--accent-soft); }
 .range { width: 190px; }
 .range svg { display: block; width: 100%; height: 22px; }
 .boom { width: 64px; }
+th .thsub { display: block; font-size: 9.5px; font-weight: 500; letter-spacing: .02em; text-transform: none; color: var(--faint); }
+.mkt { flex-basis: 100%; font-size: 13px; font-family: Inter, system-ui, -apple-system, sans-serif; }
+.mkt b { display: inline !important; font-size: inherit !important; color: var(--text) !important; text-transform: none !important; letter-spacing: 0 !important; }
+.mkt .why2 { color: var(--muted); }
 .chips { display: flex; flex-wrap: wrap; gap: 4px; }
 .chip { font-size: 11.5px; padding: 2px 7px; border-radius: 999px; white-space: nowrap; }
 .chip.up { background: var(--pos-soft); color: var(--pos); }
@@ -186,7 +193,7 @@ details.score p { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
     <table>
       <thead><tr>
         <th class="rank">#</th><th>Player</th><th class="r">Proj</th>
-        <th class="range">Range (10th–90th pct)</th><th class="r boom">Boom</th><th class="why">Why</th>
+        <th class="range">Range (10th–90th pct)</th><th class="r boom" title="Chance of more than 20 fantasy points">Boom<span class="thsub">20+ pts</span></th><th class="why">Why</th>
       </tr></thead>
       <tbody id="rows"><tr><td colspan="6" class="empty">Loading rankings…</td></tr></tbody>
     </table>
@@ -195,7 +202,7 @@ details.score p { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
   <div class="legend">
     <p><b>Proj</b> is the average outcome. The <b>range bar</b> shows the 10th–90th percentile, with the darker box covering the middle half and a tick at the median.
       <b>Boom</b> is the chance of 20+ points.</p>
-    <p><b>Why</b> shows the biggest influences on this week's number, in points for the scoring you picked. Factors are sensitivities: how much the projection changes if that one input is reset to a neutral baseline. They are not causes and don't add up to the projection. <b>Vegas adjustment</b> is different: it is the actual change made when sportsbook props disagree with the model.
+    <p><b>Why</b> shows the biggest influences on this week's number, in points for the scoring you picked. Factors are sensitivities: how much the projection changes if that one input is reset to a neutral baseline. They are not causes and don't add up to the projection. <b>Betting market</b> is different: when sportsbook lines disagree with our model, we split the difference, and the chip shows how much that moved the number.
       Click a player for details, then pick a second player to compare.</p>
   </div>
 
@@ -309,15 +316,19 @@ function render() {
 function detailRow(p) {
   const s = p.stats, f = p[state.fmt], v = p.vegas || {};
   const vline = Object.keys(v).length
-    ? `<div><b>Vegas props</b>${v.receptions != null ? v.receptions.toFixed(1) + " rec · " : ""}${v.rec_yards != null ? Math.round(v.rec_yards) + " rec yds · " : ""}${v.rush_yards != null ? Math.round(v.rush_yards) + " rush yds · " : ""}${v.tds != null ? Math.round((1 - Math.exp(-v.tds)) * 100) + "% TD" : ""}</div>
-       <div><b>Model alone</b>${f.model.toFixed(1)} pts</div>` : `<div><b>Vegas props</b>Not available</div>`;
+    ? `<div><b>Betting lines</b>${v.receptions != null ? v.receptions.toFixed(1) + " rec · " : ""}${v.rec_yards != null ? Math.round(v.rec_yards) + " rec yds · " : ""}${v.rush_yards != null ? Math.round(v.rush_yards) + " rush yds · " : ""}${v.tds != null ? Math.round((1 - Math.exp(-v.tds)) * 100) + "% TD" : ""}</div>
+` : `<div><b>Betting lines</b>None yet</div>`;
   const tdp = Math.round((1 - Math.exp(-(s.rec_tds + s.rush_tds))) * 100);
   const ctx = p.context || {};
   const frow = (k, v, cls = "") => `<tr class="${cls}"><td class="fl">${esc(k)}</td><td class="fv num ${v >= 0.05 ? "up" : v <= -0.05 ? "dn" : ""}">${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(1)}</td><td class="fc">${esc(ctx[k] || "")}</td></tr>`;
   const factors = Object.entries(f.factors || {})
     .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).map(([k, v]) => frow(k, v)).join("")
     + frow(VEGAS, f.vegas || 0, "vegas");
-  return `<tr class="detail"><td colspan="6"><div class="dgrid num">
+  const mkt = f.vegas || f.vegas === 0 && p.market
+    ? `<div class="mkt"><b>Our model ${f.model.toFixed(1)}</b> · <b>Betting market ${(f.model + 2 * f.vegas).toFixed(1)}</b> · we split the difference → <b>${f.proj.toFixed(1)}</b>
+       <span class="why2">(betting market = our model with the stats that have betting lines swapped in)</span></div>`
+    : `<div class="mkt"><b>Our model ${f.model.toFixed(1)}</b> <span class="why2">· no betting lines for this player yet, so this is our model alone. Lines are pulled late Sunday morning.</span></div>`;
+  return `<tr class="detail"><td colspan="6"><div class="dgrid num">${mkt}
     <div><b>Projected line</b>${s.receptions.toFixed(1)} rec · ${Math.round(s.rec_yards)} rec yds${s.carries >= 1 ? ` · ${s.carries.toFixed(1)} car · ${Math.round(s.rush_yards)} rush yds` : ""} · ${tdp}% TD</div>
     <div><b>Floor / Median / Ceiling</b>${f.q[0].toFixed(1)} / ${f.q[2].toFixed(1)} / ${f.q[4].toFixed(1)}</div>
     ${vline}
@@ -345,9 +356,9 @@ function renderCompare() {
     : (a.opp === b.team) ? `Same game: a shootout or a blowout lifts or sinks both. This comparison treats them as independent, so take the percentage as rough.` : "";
   el.innerHTML = `<div class="head"><span>Head to head · ${FMT.find(x => x[0] === state.fmt)[1]}</span><button data-clear>Clear</button></div>
     <div class="vs">
-      <div class="side"><div class="nm">${esc(a.name)}</div><div class="pct num">${Math.round(pa * 100)}%</div><div class="sub num" style="color:var(--muted);font-size:12px">${fa.proj.toFixed(1)} proj · ${Math.round(fa.boom * 100)}% boom</div></div>
+      <div class="side"><div class="nm">${esc(a.name)}</div><div class="pct num">${Math.round(pa * 100)}%</div><div class="sub num" style="color:var(--muted);font-size:12px">${fa.proj.toFixed(1)} proj · ${Math.round(fa.boom * 100)}% chance of 20+</div></div>
       <div class="mid">chance to<br>score more</div>
-      <div class="side r"><div class="nm">${esc(b.name)}</div><div class="pct num">${Math.round((1 - pa) * 100)}%</div><div class="sub num" style="color:var(--muted);font-size:12px">${fb.proj.toFixed(1)} proj · ${Math.round(fb.boom * 100)}% boom</div></div>
+      <div class="side r"><div class="nm">${esc(b.name)}</div><div class="pct num">${Math.round((1 - pa) * 100)}%</div><div class="sub num" style="color:var(--muted);font-size:12px">${fb.proj.toFixed(1)} proj · ${Math.round(fb.boom * 100)}% chance of 20+</div></div>
     </div>
     <div class="splitbar"><span style="width:${pa * 100}%"></span></div>
     <div class="note"><b>${esc(leader.name)}</b> scores more than ${esc(other.name)} in ${Math.round(lp * 100)}% of simulated games.${close} ${gapText}
@@ -368,19 +379,22 @@ document.getElementById("rows").onclick = e => {
 document.getElementById("cmp").onclick = e => { if (e.target.closest("[data-clear]")) { state.pick = []; render(); } };
 document.getElementById("q").oninput = e => { state.q = e.target.value; render(); };
 
-// Compact times: today → "6:02 PM", this week → "Thu 6:02 PM", older → "Oct 1".
+// Times always carry their day: "Today 6:02 PM", "Fri 6:02 PM" (this week), "Sep 28" (older).
+// A bare time would read as today.
 function shortTime(iso, { tz = false } = {}) {
   const t = new Date(iso), now = new Date();
   const time = t.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", ...(tz ? { timeZoneName: "short" } : {}) });
-  if (t.toDateString() === now.toDateString()) return time;
+  if (t.toDateString() === now.toDateString()) return `Today ${time}`;
   if (Math.abs(t - now) < 6 * 864e5) return `${t.toLocaleDateString(undefined, { weekday: "short" })} ${time}`;
   return t.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
-const shortDay = ymd => { const t = new Date(ymd + "T12:00"); return `${t.toLocaleDateString(undefined, { weekday: "short" })} ${t.getMonth() + 1}/${t.getDate()}`; };
+const shortDay = ymd => { const t = new Date(ymd + "T12:00"); return t.toDateString() === new Date().toDateString() ? "Today"
+  : `${t.toLocaleDateString(undefined, { weekday: "short" })} ${t.getMonth() + 1}/${t.getDate()}`; };
+const dayName = ymd => new Date(ymd + "T12:00").toLocaleDateString(undefined, { weekday: "short" });
 
 const HOUR = 36e5, DAY = 24 * HOUR;
 const STATE_TEXT = { ok: "Current", wait: "Waiting", stale: "Stale" };
-const VEGAS = "Vegas adjustment";
+let VEGAS = "Betting market";  // replaced by data.vegas_label (older files used "Vegas adjustment")
 // Age-based status for sources refreshed on every run (nightly at minimum).
 const byAge = iso => { const age = Date.now() - new Date(iso); return age < 26 * HOUR ? "ok" : age < 50 * HOUR ? "wait" : "stale"; };
 
@@ -412,9 +426,9 @@ function sourceStates(d) {
     weather: weatherState(f),
     lines: f.lines ? [byAge(f.lines), "Spread and over/under for every game, which set each team's implied points. Time is when the lines were last published."]
       : ["wait", "Unverified: lines are loaded, but we couldn't confirm when nflverse last published them"],
-    props: f.props ? [now - new Date(f.props) < 4 * DAY ? "ok" : "wait", `Player prop lines for ${f.props_games} games (receptions, yards, anytime TD) from DraftKings, FanDuel and other books, half of each gap between props and the model is applied`]
-      : now < new Date(f.props_next).getTime() + 3 * HOUR ? ["wait", "Props are pulled once a week, late Sunday morning ET (first try 11:15, retry 11:45), when lines are sharpest. Until then projections are model-only."]
-      : ["stale", "The scheduled props pull didn't happen; projections are model-only"],
+    props: f.props ? [now - new Date(f.props) < 4 * DAY ? "ok" : "wait", `Betting lines for ${f.props_games} games (receptions, yards, anytime TD) from DraftKings, FanDuel and other books. Where they disagree with our model, we split the difference.`]
+      : now < new Date(f.props_next).getTime() + 3 * HOUR ? ["wait", "Betting lines are pulled once a week, late Sunday morning ET (first try 11:15, retry 11:45), when they're sharpest. Until then projections are our model alone."]
+      : ["stale", "The scheduled betting-lines pull didn't happen; projections are our model alone"],
     stats: f.stats_through >= (f.games_through || "") ? ["ok", "Stats, snaps and usage include every completed game"]
       : lag < 3 * DAY ? ["wait", "Recent games are played; their stats usually arrive within a day"]
       : ["stale", "Recent games' stats are missing"],
@@ -426,8 +440,14 @@ function renderStatus(d) {
   const st = sourceStates(d);
   const tip = ([state, why]) => `${STATE_TEXT[state]}. ${why}`;
   const dot = state => `<span class="dot ${state}" role="img" aria-label="${STATE_TEXT[state]}"></span>`;
-  const cell = (label, value, s) =>
-    `<div class="src" title="${esc(tip(s))}"><div class="lbl">${label}</div><div class="val">${dot(s[0])}${esc(value)}</div></div>`;
+  const cell = (label, value, s, sub) =>
+    `<div class="src" title="${esc(tip(s))}"><div class="lbl">${label}</div><div class="val ${s[0]}">${dot(s[0])}${esc(value)}</div>`
+    + (sub ? `<div class="sub2">${esc(sub)}</div>` : "") + `</div>`;
+  const want = f.outdoor_expected ?? f.outdoor_games ?? 0, got = f.outdoor_games || 0;
+  const wxSub = !want ? "No outdoor games" : !got ? "Forecasts failed" : got < want ? `${got} of ${want} outdoor games` : "Kickoff forecasts";
+  const nextProps = "Next pull " + shortTime(f.props_next);
+  const statsSub = (f.stats_through >= (f.games_through || "")) ? "Every game played is in"
+    : `Waiting on ${dayName(f.games_through)}'s games`;
   const el = document.getElementById("status");
   el.innerHTML = `
     <div class="anchor" title="${esc(tip(st.rebuilt))}">
@@ -435,11 +455,11 @@ function renderStatus(d) {
       <div class="nxt">Next · ${esc(shortTime(f.next))}</div>
     </div>
     <div class="srcs">
-      ${cell("Injuries", f.injuries ? shortTime(f.injuries) : "Unverified", st.injuries)}
-      ${cell("Weather", weatherValue(f), st.weather)}
-      ${cell("Game lines", f.lines ? shortTime(f.lines) : "Unverified", st.lines)}
-      ${cell("Vegas props", f.props ? shortTime(f.props) : shortTime(f.props_next), st.props)}
-      ${cell("Stats", shortDay(f.stats_through), st.stats)}
+      ${cell("Injuries", f.injuries ? shortTime(f.injuries) : "Unverified", st.injuries, "Checked hourly for news")}
+      ${cell("Weather", weatherValue(f), st.weather, wxSub)}
+      ${cell("Game lines", f.lines ? shortTime(f.lines) : "Unverified", st.lines, "When lines were last published")}
+      ${cell("Betting lines", f.props ? shortTime(f.props) : "Not yet", st.props, f.props ? `Weekly · next ${shortTime(f.props_next)}` : nextProps)}
+      ${cell("Stats", "Through " + shortDay(f.stats_through), st.stats, statsSub)}
     </div>`;
   el.hidden = false;
 }
@@ -468,6 +488,7 @@ let scorecard = null;
 
 fetch("data/rankings.json", { cache: "no-cache" }).then(r => r.json()).then(d => {
   data = d;
+  VEGAS = d.vegas_label || "Vegas adjustment";
   document.getElementById("sub").textContent = `${d.season} · Week ${d.week} · RB, WR, TE`;
   renderStatus(d);
   document.getElementById("keylist").innerHTML = (d.factor_key || []).map(f =>

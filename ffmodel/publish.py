@@ -11,7 +11,7 @@ from .features import score
 from .model import COMPONENTS, QUANTILES
 
 MARKET_WEIGHT = 0.5  # share of the market-vs-model gap applied when a prop exists (a judgment call)
-VEGAS_LABEL = "Vegas adjustment"
+VEGAS_LABEL = "Betting market"
 
 # Feature groups we "neutralize" one at a time to explain a projection.
 GROUPS = {
@@ -49,10 +49,11 @@ FACTOR_KEY = {
 }
 
 
-VEGAS_KEY = ("When sportsbooks offer player props (receptions, yards, anytime TD), each prop is turned into "
-             "an expected stat and compared with the model's own estimate. Half of the difference is added "
-             "to the projection, so props that agree with the model change nothing. Not a sensitivity like "
-             "the factors above: it is the actual change made to the model's number.")
+VEGAS_KEY = ("Sportsbooks post lines for some players' receptions, yards and anytime TD. We turn each line "
+             "into an expected stat and compare it with our model's own estimate of that stat. Where they "
+             "disagree, we split the difference: half the gap is added to the projection. Where they agree, "
+             "nothing changes. Unlike the factors above, this is the actual change made to the model's "
+             "number, not a sensitivity.")
 
 
 def explain(model, live, train):
@@ -183,7 +184,7 @@ def _qb_text(r, names):
 
 def _vegas_text(r):
     if not r.get("market", False):
-        return "No props for this player; projection is model-only"
+        return "No betting lines for this player; projection is our model alone"
     bits = []
     for k, lab, f in (("receptions", "rec", "{:.1f}"), ("rec_yards", "rec yds", "{:.0f}"),
                       ("rush_yards", "rush yds", "{:.0f}")):
@@ -193,7 +194,7 @@ def _vegas_text(r):
     t = r.get("mkt_tds")
     if t is not None and pd.notna(t):
         bits.append(f"TD {1 - np.exp(-t):.0%} (model {1 - np.exp(-r['model_tds']):.0%})")
-    return f"Props vs. model: {'; '.join(bits)}. Half of each gap is applied"
+    return f"Betting lines vs. our model: {'; '.join(bits)}. We move halfway toward the lines"
 
 
 def to_json(pred, reasons, live_players, games, season, week, meta, ctx=None):
@@ -248,7 +249,7 @@ def to_json(pred, reasons, live_players, games, season, week, meta, ctx=None):
                           if (pred.market & (pred.half_proj >= 8)).any() else 0.0,
                           "max": round(float(pred.loc[pred.half_proj >= 8, "half_vegas"].abs().max()), 1)
                           if (pred.half_proj >= 8).any() else 0.0}],
-        **meta, "players": players,
+        "vegas_label": VEGAS_LABEL, **meta, "players": players,
     }
 
 
