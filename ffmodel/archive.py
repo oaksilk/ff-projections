@@ -173,6 +173,7 @@ def third_party_record(season, week, ff_ids):
             try:
                 rec[name] = fn()
                 log.info("archived %d %s rows", len(rec[name]), name)
+                rec["meta"].pop(f"{name}_error", None)
                 break
             except Exception as e:  # unofficial / third-party: never fail the run
                 log.warning("third-party %s unavailable (attempt %d): %s", name, attempt + 1, e)
