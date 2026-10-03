@@ -77,9 +77,10 @@ def main():
     log.info("%d skill players expected active; %d DBs ruled out; %d of %d weather forecasts; %s information",
              len(players), len(db_out), len(wx), n_outdoor, info)
 
+    absences = {}
     df = build_features(d, live_players=players[["player_id", "team", "season", "week", "position",
                                                  "inj_report", "inj_practice"]],
-                        live_def_out=db_out, weather_override=wx, info=info)
+                        live_def_out=db_out, weather_override=wx, info=info, absences_out=absences)
     hist = df[~df.live]
     live = df[df.live & (df.season == season) & (df.week == week)]
 
@@ -95,7 +96,8 @@ def main():
     reasons = publish.explain(model, live, hist)
     weather = {r.game_id: {"temp": round(r.temp), "wind": round(r.wind), "precip": round(r.precip, 2)}
                for r in wx.itertuples() if pd.notna(r.temp) and pd.notna(r.wind)}
-    ctx = publish.context(live, hist, d["players"].set_index("gsis_id").display_name)
+    pfr_names = d["players"].dropna(subset=["pfr_id"]).drop_duplicates("pfr_id").set_index("pfr_id").display_name
+    ctx = publish.context(live, hist, d["players"].set_index("gsis_id").display_name, absences, pfr_names)
     ps = d["player_stats"]
     played = ps[(ps.season == season) & (ps.season_type == "REG")].game_id.unique()
     sched = d["schedules"]

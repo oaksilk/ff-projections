@@ -224,6 +224,11 @@ def _absences(appear, value_cols, is_out, min_value=None, lookback=3):
     return out.reset_index().rename(columns={"target_idx": "team_game_idx"}), absent
 
 
+def next_games(games):
+    """(team, team_game_idx) of each team's next unplayed game: the one live rows describe."""
+    return games[~games.completed].groupby("team", as_index=False).team_game_idx.min()
+
+
 def _out_checker(games, avail, covered, live_out):
     """Build an `is_out` function for _absences.
 
@@ -250,9 +255,13 @@ def _out_checker(games, avail, covered, live_out):
 
 # ---------------------------------------------------------------- main
 
-def build_features(d, live_players=None, live_def_out=None, weather_override=None, info="sunday"):
+def build_features(d, live_players=None, live_def_out=None, weather_override=None, info="sunday",
+                   absences_out=None):
     """Return one row per player-game with features and (if played) labels.
 
+    absences_out: optional dict; filled with who is counted as out for upcoming
+          games ("teammates": pid/team/shares, "dbs": pfr pid/team/def_pct), so
+          the page can name them.
     info: which pregame availability information historical rows use
           ("friday" or "sunday", see INFO_SETS). Live rows use whatever the
           live injury/inactive sources say at run time.
@@ -383,7 +392,7 @@ def build_features(d, live_players=None, live_def_out=None, weather_override=Non
     live_out = None
     if live_players is not None and len(live_players):
         # Upcoming games: recent teammates not in the expected-active list are out.
-        nxt = games[~games.completed][["team", "team_game_idx"]]
+        nxt = next_games(games)
         live_present = set(zip(pg.loc[pg.live, "player_id"], pg.loc[pg.live, "team"],
                                pg.loc[pg.live, "team_game_idx"]))
         cand = appear[["pid", "team"]].drop_duplicates().merge(nxt, on="team")
@@ -391,6 +400,10 @@ def build_features(d, live_players=None, live_def_out=None, weather_override=Non
         live_out = cand[keep]
     vac, gone = _absences(appear, ["target_share", "carry_share"],
                           _out_checker(games, avail, covered, live_out))
+    upcoming = next_games(games)
+    if absences_out is not None:
+        absences_out["teammates"] = gone.merge(upcoming, on=["team", "team_game_idx"])[
+            ["pid", "team", "target_share", "carry_share"]]
     vac = vac.rename(columns={"target_share_sum": "vac_tgt", "carry_share_sum": "vac_car"})[
         ["team", "team_game_idx", "vac_tgt", "vac_car"]]
     tg = tg.merge(vac, on=["team", "team_game_idx"], how="left")
@@ -408,7 +421,7 @@ def build_features(d, live_players=None, live_def_out=None, weather_override=Non
     live_db_out = None
     if live_def_out is not None:
         # Upcoming games: a recent DB is out only if ruled out (or gone from the team).
-        nxt = games[~games.completed][["team", "team_game_idx"]]
+        nxt = next_games(games)
         cand = dbs[["pid", "team"]].drop_duplicates().merge(nxt, on="team")
         live_db_out = cand[cand.pid.isin(live_def_out)]
     # DB snap data is keyed by PFR id; roster status by GSIS id.
@@ -418,8 +431,10 @@ def build_features(d, live_players=None, live_def_out=None, weather_override=Non
     # DBs we can't map to a GSIS id are never counted out (no pregame status to go on).
     unmapped = set(dbs.pid) - set(pfr2gsis.pfr_id)
     db_check = _out_checker(games, db_avail, covered, live_db_out)
-    dba, _ = _absences(dbs[["pid", "team", "team_game_idx", "def_pct"]], ["def_pct"],
-                       lambda c: db_check(c) & ~c.pid.isin(unmapped), min_value=0.5)
+    dba, db_gone = _absences(dbs[["pid", "team", "team_game_idx", "def_pct"]], ["def_pct"],
+                             lambda c: db_check(c) & ~c.pid.isin(unmapped), min_value=0.5)
+    if absences_out is not None:
+        absences_out["dbs"] = db_gone.merge(upcoming, on=["team", "team_game_idx"])[["pid", "team", "def_pct"]]
     dba = dba.rename(columns={"def_pct_sum": "db_out_share", "def_pct_count": "db_out_n"})
     dba = dba.merge(games[["team", "team_game_idx", "season", "week"]], on=["team", "team_game_idx"])
     dba = dba.rename(columns={"team": "opp"})[["season", "week", "opp", "db_out_share", "db_out_n"]]

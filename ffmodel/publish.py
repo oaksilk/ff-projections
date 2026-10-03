@@ -35,8 +35,10 @@ FACTOR_KEY = {
                "and how many plays opponents run against them. Baseline: a league-typical defense.",
     "secondary": "Regular defensive backs (50%+ of snaps recently) on the opposing team who are "
                  "ruled out or on IR. Baseline: a fully healthy secondary.",
-    "teammates": "Share of the team's recent targets and carries belonging to teammates who are out "
-                 "this week, which frees up opportunities. Baseline: nobody missing.",
+    "teammates": "Share of the team's recent targets and carries belonging to teammates (any RB, WR or TE, "
+                 "not just the same position) who are out this week, which frees up opportunities. Only "
+                 "teammates who played in the last three games count; someone out for longer is already "
+                 "reflected in everyone's recent stats. Baseline: nobody missing.",
     "qb": "This week's starting QB's longer-run efficiency (EPA per dropback, weighted toward "
           "recent games) compared with the QB play behind this player's recent stats. With a new "
           "starter, this is the upgrade or downgrade. With the same starter, it is the model "
@@ -139,8 +141,49 @@ def blend_market(pred, live_players, raw_props):
     return pred
 
 
-def context(live, train, names):
-    """Short human-readable inputs behind each factor, per player row."""
+def _out_list(rows, name_of, share_text, limit=4):
+    """'Name (share), Name (share)' for the biggest roles, then 'and N more'."""
+    if rows is None or rows.empty:
+        return ""
+    bits = [f"{name_of.get(r.pid, 'Unknown')} ({share_text(r)})" for r in rows.itertuples()]
+    more = f", and {len(bits) - limit} more with small roles" if len(bits) > limit else ""
+    return ", ".join(bits[:limit]) + more
+
+
+def _teammate_text(r, absent, names):
+    if absent is None:
+        return f"{r.vac_tgt:.0%} of targets and {r.vac_car:.0%} of carries vacated by teammates who are out"
+    t = absent[(absent.team == r.team) & (absent.pid != r.player_id)].copy()
+    t["size"] = t.target_share + t.carry_share
+    t = t[t["size"] >= 0.01].sort_values("size", ascending=False)
+    if t.empty:
+        return ("Only teammates with small roles are out" if r.vac_tgt + r.vac_car >= 0.005
+                else "No teammates with a recent role are ruled out")
+
+    def share(x):
+        parts = [f"{v:.0%} of {k}" for v, k in ((x.carry_share, "carries"), (x.target_share, "targets")) if v >= 0.01]
+        return ", ".join(parts)
+    return (f"{r.vac_tgt:.0%} of targets and {r.vac_car:.0%} of carries vacated. "
+            f"Out: {_out_list(t, names, share)}")
+
+
+def _db_text(r, absent, pfr_names):
+    n = int(r.db_out_n)
+    head = f"{n} regular {r.opp} DB{'s' if n != 1 else ''} out"
+    if absent is None or n == 0:
+        return head
+    t = absent[absent.team == r.opp].sort_values("def_pct", ascending=False)
+    return f"{head}: {_out_list(t, pfr_names, lambda x: f'{x.def_pct:.0%} of snaps')}" if len(t) else head
+
+
+def context(live, train, names, absences=None, pfr_names=None):
+    """Short human-readable inputs behind each factor, per player row.
+
+    absences: build_features' absences_out (who is counted as out), so the
+    page can name them; names/pfr_names map gsis/pfr ids to display names.
+    """
+    absences = absences or {}
+    pfr_names = pfr_names if pfr_names is not None else {}
     recent = train[train.season >= train.season.max() - 1]
     typ_implied = recent.implied.median()
     # Rank this week's opponents by fantasy points allowed to each position (1 = most generous).
@@ -157,8 +200,8 @@ def context(live, train, names):
             "matchup": f"{r.opp} allows {r.def_alw_fp_pos:.1f} half-PPR pts/game to {r.position}s lately "
                        f"(#{int(opp_rank.loc[(r.position, r.opp), 'rank'])} most of "
                        f"{int(opp_rank.loc[(r.position, r.opp), 'n'])} opponents this week)",
-            "secondary": f"{int(r.db_out_n)} regular {r.opp} DB{'s' if r.db_out_n != 1 else ''} out",
-            "teammates": f"{r.vac_tgt:.0%} of targets and {r.vac_car:.0%} of carries vacated by injured teammates",
+            "secondary": _db_text(r, absences.get("dbs"), pfr_names),
+            "teammates": _teammate_text(r, absences.get("teammates"), names),
             "qb": _qb_text(r, names),
             "weather": "Dome / roof" if dome else ("Forecast unavailable" if pd.isna(r.temp) or pd.isna(r.wind)
                                                   else f"{r.temp:.0f}°F, wind {r.wind:.0f} mph"),
