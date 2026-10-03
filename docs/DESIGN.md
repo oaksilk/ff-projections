@@ -218,7 +218,7 @@ you picked). Groups and baselines live in `publish.GROUPS` and
 | Teammate absences | `vac_*` | 0 |
 | QB vs. recent QB play | `qb_epa`, `qb_change`, `qb_upgrade` | `qb_epa` = team's recent passing EPA, no change, upgrade 0 |
 | Weather | temp, wind | 65°F, 5 mph (0 effect when no forecast) |
-| Own injury status | report, practice | Healthy, full practice |
+| Injury & practice | report, practice | No designation, full practice |
 
 These are **sensitivities, not causes**: one input reset, everything else held
 fixed. The model has interactions, so effects don't sum to the projection and
@@ -508,4 +508,7 @@ backtest. Compare against the table above; don't ship regressions.
 | 2026-10-03 | Freshness times always show their day plus a "what this means / next" line; status color unchanged (green = nothing newer exists), attention states tint the text | Owner found "4:24 PM / Fri 4:09 PM / Thu 10/1" hard to read. Coloring by "not today" would make weekly sources yellow most of the week, so people would learn to ignore yellow |
 | 2026-10-03 | "Vegas adjustment" renamed "Betting market"; detail row shows "Our model X · Betting market Y · we split the difference → Z" | Owner asked how the adjustment relates to the model; "adjustment" read like a fudge factor |
 | 2026-10-03 | Boom column labeled "Boom (20+ pts)"; threshold stays 20 points for every position | Owner: a single objective threshold is what makes flex comparisons legible |
+| 2026-10-03 | "Own injury status" renamed "Injury & practice"; input text leads with what moved the number ("No game-status designation, but limited in practice this week") | Owner saw Brock Bowers lose 0.4 for "No injury designation, limited practice" and read it as a penalty for being healthy. The effect is real (limited practice, no designation) but the label hid it |
+| 2026-10-03 | Detail row shows a 3-row table: Our model / Betting market / We show, per stat and in points; market cells green (Vegas higher) or red (lower); shown row emphasized | Owner found the model-vs-Vegas sentence useful but hard to scan; side-by-side columns make the gap visible at a glance |
+| 2026-10-03 | Why column keeps left-aligned chips with a wider gutter after Boom (not centered) | Chips are sorted biggest first; left alignment keeps the biggest at the same spot on every row. Centering would make ragged rows and move it around |
 

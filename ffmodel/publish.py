@@ -21,7 +21,7 @@ GROUPS = {
     "teammates": (["vac_tgt", "vac_car"], "Teammate absences"),
     "qb": (["qb_change", "qb_epa", "qb_upgrade"], "QB vs. recent QB play"),
     "weather": (["temp", "wind"], "Weather"),
-    "health": (["inj_report", "inj_practice"], "Own injury status"),
+    "health": (["inj_report", "inj_practice"], "Injury & practice"),
 }
 
 
@@ -44,8 +44,10 @@ FACTOR_KEY = {
           "Baseline: the same quality of QB play as recent weeks.",
     "weather": "Kickoff forecast for outdoor stadiums (wind and temperature). Domes and retractable "
                "roofs are neutral. Baseline: 65°F with 5 mph wind.",
-    "health": "The player's own injury designation and practice participation this week. "
-              "Baseline: healthy and practicing fully.",
+    "health": "The player's game-status designation (Questionable, Doubtful) and how much he practiced "
+              "this week. Players who are limited or miss practice score a bit less on average, even "
+              "without a designation, though some of that is routine veteran rest. "
+              "Baseline: no designation and full practice all week.",
 }
 
 
@@ -160,11 +162,22 @@ def context(live, train, names):
             "qb": _qb_text(r, names),
             "weather": "Dome / roof" if dome else ("Forecast unavailable" if pd.isna(r.temp) or pd.isna(r.wind)
                                                   else f"{r.temp:.0f}°F, wind {r.wind:.0f} mph"),
-            "health": {0: "No injury designation", 1: "Questionable", 2: "Doubtful"}.get(int(r.inj_report), "Listed")
-                      + {0: "", 1: ", limited practice", 2: ", did not practice"}.get(int(r.inj_practice), ""),
+            "health": _health_text(int(r.inj_report), int(r.inj_practice)),
         }
         out[i] = {GROUPS[k][1]: v for k, v in ctx.items()}
     return out
+
+
+def _health_text(report, practice):
+    """Plain English for the player's own status; leads with what moves the number."""
+    prac = {1: "limited in practice", 2: "missed practice"}.get(practice)
+    if report == 0:
+        if prac is None:
+            return "Healthy: no designation, full practice"
+        rest = " (could be routine rest)" if practice == 2 else ""
+        return f"No game-status designation, but {prac} this week{rest}"
+    tag = {1: "Questionable", 2: "Doubtful"}.get(report, "On the injury report")
+    return f"{tag}" + (f", {prac} this week" if prac else ", full practice")
 
 
 def _qb_text(r, names):
@@ -216,6 +229,8 @@ def to_json(pred, reasons, live_players, games, season, week, meta, ctx=None):
             "market": bool(r.get("market", False)),
             "stats": {k: round(float(r[f"proj_{k}"]), 2) for k in
                       ("receptions", "rec_yards", "rec_tds", "carries", "rush_yards", "rush_tds")},
+            "model_stats": {k: round(float(r.get(f"model_{k}", r[f"proj_{k}"])), 2) for k in
+                            ("receptions", "rec_yards", "rec_tds", "carries", "rush_yards", "rush_tds")},
             "context": {**(ctx or {}).get(i, {}), VEGAS_LABEL: _vegas_text(r)},
             "vegas": {k: round(float(r[f"mkt_{k}"]), 2) for k in ("receptions", "rec_yards", "rush_yards", "tds")
                       if f"mkt_{k}" in r and pd.notna(r[f"mkt_{k}"])},

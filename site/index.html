@@ -117,9 +117,33 @@ tr.row.sel td { background: var(--accent-soft); }
 .range svg { display: block; width: 100%; height: 22px; }
 .boom { width: 64px; }
 th .thsub { display: block; font-size: 9.5px; font-weight: 500; letter-spacing: .02em; text-transform: none; color: var(--faint); }
-.mkt { flex-basis: 100%; font-size: 13px; font-family: Inter, system-ui, -apple-system, sans-serif; }
-.mkt b { display: inline !important; font-size: inherit !important; color: var(--text) !important; text-transform: none !important; letter-spacing: 0 !important; }
-.mkt .why2 { color: var(--muted); }
+/* Why: a clear gutter after Boom; chips stay left-aligned so the biggest factor
+   always starts at the same spot and the eye can scan straight down. */
+th.why, td.why { padding-left: 22px; }
+/* Our model vs. the betting market: three rows, the shown number emphasized,
+   market cells tinted by whether Vegas is higher or lower than our model. */
+.vsm { margin: 2px 0 14px; }
+.vsm .cap { font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: .04em; font-weight: 600; margin-bottom: 4px; }
+.vsm table { width: auto; font-size: 13px; }
+.vsm th { padding: 3px 14px 3px 0; border: 0; font-size: 10.5px; text-align: right; }
+.vsm th:first-child { text-align: left; }
+.vsm td { padding: 4px 14px 4px 0; border: 0; background: transparent !important; text-align: right; font-family: "JetBrains Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+.vsm td.lab { text-align: left; font-family: Inter, system-ui, sans-serif; color: var(--muted); white-space: nowrap; }
+.vsm td.pts { font-weight: 700; padding-left: 10px; border-left: 1px solid var(--border); }
+.vsm tr.mk td.hi { color: var(--pos); } .vsm tr.mk td.lo { color: var(--neg); } .vsm td.na { color: var(--faint); }
+.vsm tr.shown td { border-top: 1px solid var(--border); padding-top: 6px; color: var(--text); font-weight: 600; }
+.vsm tr.shown td.lab { color: var(--text); }
+.vsm tr.shown td.pts { font-size: 15px; color: var(--accent); }
+.vsm .note { font-size: 12px; color: var(--muted); margin-top: 4px; font-family: Inter, system-ui, sans-serif; }
+@media (max-width: 760px) {
+  /* Keep the comparison inside the screen; it scrolls sideways if a row ever needs more room. */
+  .vsm .scroll { max-width: calc(100vw - 60px); }
+  .vsm table { font-size: 12px; }
+  .vsm th { padding: 3px 6px 3px 0; font-size: 9.5px; }
+  .vsm td { padding: 4px 6px 4px 0; }
+  .vsm td.pts { padding-left: 7px; }
+  .vsm .note { max-width: calc(100vw - 66px); }
+}
 .chips { display: flex; flex-wrap: wrap; gap: 4px; }
 .chip { font-size: 11.5px; padding: 2px 7px; border-radius: 999px; white-space: nowrap; }
 .chip.up { background: var(--pos-soft); color: var(--pos); }
@@ -313,26 +337,43 @@ function render() {
   renderCompare();
 }
 
+// Model vs. betting market, side by side: what each says, and what we show.
+function marketTable(p, f) {
+  const ms = p.model_stats || p.stats, s = p.stats, v = p.vegas || {};
+  const tdPct = x => Math.round((1 - Math.exp(-x)) * 100);
+  const rb = s.carries >= 1 || v.rush_yards != null;
+  const cols = [
+    ["Rec", ms.receptions, v.receptions, s.receptions, x => x.toFixed(1)],
+    ["Rec yds", ms.rec_yards, v.rec_yards, s.rec_yards, x => Math.round(x)],
+    ...(rb ? [["Rush yds", ms.rush_yards, v.rush_yards, s.rush_yards, x => Math.round(x)]] : []),
+    ["TD", ms.rec_tds + ms.rush_tds, v.tds, s.rec_tds + s.rush_tds, x => tdPct(x) + "%"],
+  ];
+  const fl = FMT.find(x => x[0] === state.fmt)[1];
+  const head = `<tr><th></th>${cols.map(c => `<th>${c[0]}</th>`).join("")}<th>${fl} pts</th></tr>`;
+  const model = `<tr><td class="lab">Our model</td>${cols.map(c => `<td>${c[4](c[1])}</td>`).join("")}<td class="pts">${f.model.toFixed(1)}</td></tr>`;
+  if (!p.market) {
+    return `<div class="vsm"><div class="cap">Our model vs. the betting market</div><table>${head}${model}</table>
+      <div class="note">No betting lines for this player yet, so this is our model alone. Lines are pulled late Sunday morning.</div></div>`;
+  }
+  const cmp = (m, o) => m == null ? "na" : Math.abs(m - o) < 1e-6 ? "" : m > o ? "hi" : "lo";
+  const mkPts = f.model + 2 * f.vegas;
+  const market = `<tr class="mk"><td class="lab">Betting market</td>${cols.map(c =>
+      `<td class="${cmp(c[2], c[1])}">${c[2] == null ? "—" : c[4](c[2])}</td>`).join("")}<td class="pts ${cmp(mkPts, f.model)}">${mkPts.toFixed(1)}</td></tr>`;
+  const shown = `<tr class="shown"><td class="lab">We show</td>${cols.map(c => `<td>${c[4](c[3])}</td>`).join("")}<td class="pts">${f.proj.toFixed(1)}</td></tr>`;
+  return `<div class="vsm"><div class="cap">Our model vs. the betting market</div><div class="scroll"><table>${head}${model}${market}${shown}</table></div>
+    <div class="note">We split the difference: halfway between our model and the betting lines. Green means Vegas is higher than our model, red lower. — means no betting line for that stat.</div></div>`;
+}
+
 function detailRow(p) {
-  const s = p.stats, f = p[state.fmt], v = p.vegas || {};
-  const vline = Object.keys(v).length
-    ? `<div><b>Betting lines</b>${v.receptions != null ? v.receptions.toFixed(1) + " rec · " : ""}${v.rec_yards != null ? Math.round(v.rec_yards) + " rec yds · " : ""}${v.rush_yards != null ? Math.round(v.rush_yards) + " rush yds · " : ""}${v.tds != null ? Math.round((1 - Math.exp(-v.tds)) * 100) + "% TD" : ""}</div>
-` : `<div><b>Betting lines</b>None yet</div>`;
-  const tdp = Math.round((1 - Math.exp(-(s.rec_tds + s.rush_tds))) * 100);
-  const ctx = p.context || {};
+  const f = p[state.fmt];
+  const ctx = { ...(p.context || {}) };
+  if (p.market) ctx[VEGAS] = "Halfway between our model and the betting lines (see the comparison above)";
   const frow = (k, v, cls = "") => `<tr class="${cls}"><td class="fl">${esc(k)}</td><td class="fv num ${v >= 0.05 ? "up" : v <= -0.05 ? "dn" : ""}">${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(1)}</td><td class="fc">${esc(ctx[k] || "")}</td></tr>`;
   const factors = Object.entries(f.factors || {})
     .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).map(([k, v]) => frow(k, v)).join("")
     + frow(VEGAS, f.vegas || 0, "vegas");
-  const mkt = f.vegas || f.vegas === 0 && p.market
-    ? `<div class="mkt"><b>Our model ${f.model.toFixed(1)}</b> · <b>Betting market ${(f.model + 2 * f.vegas).toFixed(1)}</b> · we split the difference → <b>${f.proj.toFixed(1)}</b>
-       <span class="why2">(betting market = our model with the stats that have betting lines swapped in)</span></div>`
-    : `<div class="mkt"><b>Our model ${f.model.toFixed(1)}</b> <span class="why2">· no betting lines for this player yet, so this is our model alone. Lines are pulled late Sunday morning.</span></div>`;
-  return `<tr class="detail"><td colspan="6"><div class="dgrid num">${mkt}
-    <div><b>Projected line</b>${s.receptions.toFixed(1)} rec · ${Math.round(s.rec_yards)} rec yds${s.carries >= 1 ? ` · ${s.carries.toFixed(1)} car · ${Math.round(s.rush_yards)} rush yds` : ""} · ${tdp}% TD</div>
-    <div><b>Floor / Median / Ceiling</b>${f.q[0].toFixed(1)} / ${f.q[2].toFixed(1)} / ${f.q[4].toFixed(1)}</div>
-    ${vline}
-  </div>
+  return `<tr class="detail"><td colspan="6">${marketTable(p, f)}
+  <div class="dgrid num"><div><b>Floor / Median / Ceiling</b>${f.q[0].toFixed(1)} / ${f.q[2].toFixed(1)} / ${f.q[4].toFixed(1)}</div></div>
   <table class="ftab"><thead><tr><th>Factor (sensitivity)</th><th class="r">Pts</th><th>Input this week</th></tr></thead><tbody>${factors}</tbody></table>
   <button class="cmpbtn" data-cmp="${p.id}">${state.pick.includes(p.id) ? "Remove from comparison" : "Compare with another player"}</button></td></tr>`;
 }
